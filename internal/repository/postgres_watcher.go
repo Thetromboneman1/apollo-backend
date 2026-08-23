@@ -291,6 +291,58 @@ func (p *postgresWatcherRepository) Update(ctx context.Context, watcher *domain.
 	return err
 }
 
+// UpdateForDeviceAndAccount applies an account-scoped watcher mutation only
+// while the account is still associated with the device. The association is
+// checked in the same statement as the update so a concurrent disassociation
+// cannot leave a stale authorization decision in effect.
+func (p *postgresWatcherRepository) UpdateForDeviceAndAccount(ctx context.Context, watcher *domain.Watcher, apns string, rid string) error {
+	if err := watcher.Validate(); err != nil {
+		return err
+	}
+
+	query := `
+		UPDATE watchers
+		SET watchee_id = $2,
+			author = $3,
+			subreddit = $4,
+			upvotes = $5,
+			keyword = $6,
+			flair = $7,
+			domain = $8,
+			label = $9
+		FROM devices_accounts, devices, accounts
+		WHERE watchers.id = $1
+			AND watchers.device_id = devices.id
+			AND watchers.account_id = accounts.id
+			AND devices_accounts.device_id = devices.id
+			AND devices_accounts.account_id = accounts.id
+			AND devices.apns_token = $10
+			AND accounts.reddit_account_id = $11`
+
+	tag, err := p.conn.Exec(
+		ctx,
+		query,
+		watcher.ID,
+		watcher.WatcheeID,
+		watcher.Author,
+		watcher.Subreddit,
+		watcher.Upvotes,
+		watcher.Keyword,
+		watcher.Flair,
+		watcher.Domain,
+		watcher.Label,
+		apns,
+		rid,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
 func (p *postgresWatcherRepository) IncrementHits(ctx context.Context, id int64) error {
 	query := `UPDATE watchers SET hits = hits + 1, last_notified_at = $2 WHERE id = $1`
 	_, err := p.conn.Exec(ctx, query, id, time.Now())
@@ -301,6 +353,30 @@ func (p *postgresWatcherRepository) Delete(ctx context.Context, id int64) error 
 	query := `DELETE FROM watchers WHERE id = $1`
 	_, err := p.conn.Exec(ctx, query, id)
 	return err
+}
+
+// DeleteForDeviceAndAccount mirrors UpdateForDeviceAndAccount's atomic
+// current-association check for destructive watcher mutations.
+func (p *postgresWatcherRepository) DeleteForDeviceAndAccount(ctx context.Context, id int64, apns string, rid string) error {
+	query := `
+		DELETE FROM watchers
+		USING devices_accounts, devices, accounts
+		WHERE watchers.id = $1
+			AND watchers.device_id = devices.id
+			AND watchers.account_id = accounts.id
+			AND devices_accounts.device_id = devices.id
+			AND devices_accounts.account_id = accounts.id
+			AND devices.apns_token = $2
+			AND accounts.reddit_account_id = $3`
+
+	tag, err := p.conn.Exec(ctx, query, id, apns, rid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 func (p *postgresWatcherRepository) DeleteByTypeAndWatcheeID(ctx context.Context, typ domain.WatcherType, id int64) error {

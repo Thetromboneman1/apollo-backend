@@ -214,9 +214,8 @@ func (a *api) editWatcherHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.errorResponse(w, r, 422, err)
 		return
-	} else if watcher.Device.APNSToken != vars["apns"] {
-		err := fmt.Errorf("wrong device for watcher %d", watcher.ID)
-		a.errorResponse(w, r, 422, err)
+	} else if watcher.Device.APNSToken != apns || watcher.Account.AccountID != rid {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -300,8 +299,12 @@ func (a *api) editWatcherHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := a.watcherRepo.Update(ctx, &watcher); err != nil {
-		a.errorResponse(w, r, 500, err)
+	if err := a.watcherRepo.UpdateForDeviceAndAccount(ctx, &watcher, apns, rid); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		a.errorResponse(w, r, http.StatusInternalServerError, errors.New("failed to update watcher"))
 		return
 	}
 
@@ -323,13 +326,19 @@ func (a *api) deleteWatcherHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.errorResponse(w, r, 422, err)
 		return
-	} else if watcher.Device.APNSToken != vars["apns"] {
-		err := fmt.Errorf("wrong device for watcher %d", watcher.ID)
-		a.errorResponse(w, r, 422, err)
+	} else if watcher.Device.APNSToken != vars["apns"] || watcher.Account.AccountID != vars["redditID"] {
+		http.NotFound(w, r)
 		return
 	}
 
-	_ = a.watcherRepo.Delete(ctx, id)
+	if err := a.watcherRepo.DeleteForDeviceAndAccount(ctx, id, vars["apns"], vars["redditID"]); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		a.errorResponse(w, r, http.StatusInternalServerError, errors.New("failed to delete watcher"))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

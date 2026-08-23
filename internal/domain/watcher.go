@@ -91,7 +91,9 @@ type WatcherRepository interface {
 
 	Create(ctx context.Context, watcher *Watcher) error
 	Update(ctx context.Context, watcher *Watcher) error
+	UpdateForDeviceAndAccount(ctx context.Context, watcher *Watcher, apns string, rid string) error
 	IncrementHits(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
+	DeleteForDeviceAndAccount(ctx context.Context, id int64, apns string, rid string) error
 	DeleteByTypeAndWatcheeID(context.Context, WatcherType, int64) error
 }

@@ -135,6 +135,16 @@ func (a *api) Routes() *mux.Router {
 	r.HandleFunc("/v1/device/{apns}/test/trending_post", generateNotificationTester(a, trendingPost)).Methods("POST")
 	r.HandleFunc("/v1/device/{apns}/test/username_mention", generateNotificationTester(a, usernameMention)).Methods("POST")
 
+	// Compatibility routes for Apollo archives whose persisted account object
+	// has no Reddit fullname. Keep this list explicit: only the account-scoped
+	// notification and watcher operations may resolve identity from the device.
+	r.HandleFunc("/v1/device/{apns}/account//notifications", a.resolveEmptyAccountCompatibility(a.getNotificationsAccountHandler)).Methods("GET")
+	r.HandleFunc("/v1/device/{apns}/account//notifications", a.resolveEmptyAccountCompatibility(a.notificationsAccountHandler)).Methods("PATCH")
+	r.HandleFunc("/v1/device/{apns}/account//watchers", a.resolveEmptyAccountCompatibility(a.listWatchersHandler)).Methods("GET")
+	r.HandleFunc("/v1/device/{apns}/account//watcher", a.resolveEmptyAccountCompatibility(a.createWatcherHandler)).Methods("POST")
+	r.HandleFunc("/v1/device/{apns}/account//watcher/{watcherID}", a.resolveEmptyAccountCompatibility(a.editWatcherHandler)).Methods("PATCH")
+	r.HandleFunc("/v1/device/{apns}/account//watcher/{watcherID}", a.resolveEmptyAccountCompatibility(a.deleteWatcherHandler)).Methods("DELETE")
+
 	r.HandleFunc("/v1/device/{apns}/account/{redditID}", a.disassociateAccountHandler).Methods("DELETE")
 	r.HandleFunc("/v1/device/{apns}/account/{redditID}/notifications", a.notificationsAccountHandler).Methods("PATCH")
 	r.HandleFunc("/v1/device/{apns}/account/{redditID}/notifications", a.getNotificationsAccountHandler).Methods("GET")
