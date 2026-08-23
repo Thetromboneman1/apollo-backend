@@ -183,7 +183,11 @@ func (rc *Client) doRequest(ctx context.Context, r *Request, errmap map[int]erro
 
 	start := time.Now()
 
-	resp, err := rc.client.Do(req)
+	client := rc.client
+	if r.client != nil {
+		client = r.client
+	}
+	resp, err := client.Do(req)
 
 	_ = rc.statsd.Incr("reddit.api.calls", r.tags, 0.1)
 
@@ -640,6 +644,25 @@ func (rac *AuthenticatedClient) MessageUnread(ctx context.Context, opts ...Reque
 		return nil, err
 	}
 	return lr.(*ListingResponse), nil
+}
+
+// MeWithAccessToken verifies the Reddit identity represented by a caller
+// supplied access token without loading or mutating a stored account grant.
+func (rc *Client) MeWithAccessToken(ctx context.Context, accessToken string, opts ...RequestOption) (*MeResponse, error) {
+	opts = append(rc.defaultOpts, opts...)
+	opts = append(opts, []RequestOption{
+		WithTags([]string{"url:/api/v1/me"}),
+		WithMethod("GET"),
+		WithToken(accessToken),
+		WithURL("https://oauth.reddit.com/api/v1/me"),
+	}...)
+
+	req := NewRequest(opts...)
+	mr, err := rc.request(ctx, req, defaultErrorMap, NewMeResponse, nil)
+	if err != nil {
+		return nil, err
+	}
+	return mr.(*MeResponse), nil
 }
 
 func (rac *AuthenticatedClient) Me(ctx context.Context, opts ...RequestOption) (*MeResponse, error) {

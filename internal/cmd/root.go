@@ -10,18 +10,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-
-	_ "github.com/honeycombio/honeycomb-opentelemetry-go"
-	"github.com/honeycombio/opentelemetry-go-contrib/launcher"
 )
 
 func Execute(ctx context.Context) int {
 	_ = godotenv.Load()
-
-	otelShutdown, err := launcher.ConfigureOpenTelemetry()
-	if err == nil {
-		defer otelShutdown()
-	}
 
 	profile := false
 

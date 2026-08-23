@@ -428,7 +428,7 @@ func (sc *subredditsConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("subreddit#id", id),
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("apns", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 				)
 			} else if !res.Sent {
 				_ = sc.statsd.Incr(push.ErrorsMetric(watcher.Device), []string{}, 1)
@@ -436,7 +436,7 @@ func (sc *subredditsConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("subreddit#id", id),
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("apns", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 					zap.Int("response#status", res.Status),
 					zap.String("response#reason", res.Reason),
 				)
@@ -446,7 +446,7 @@ func (sc *subredditsConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("subreddit#id", id),
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("device#token", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 				)
 			}
 		}

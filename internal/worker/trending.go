@@ -275,7 +275,7 @@ func (tc *trendingConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("subreddit#id", id),
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("apns", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 					zap.Int64("median_score", medianScore),
 				)
 			} else if !res.Sent {
@@ -284,7 +284,7 @@ func (tc *trendingConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("subreddit#id", id),
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("apns", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 					zap.Int64("median_score", medianScore),
 					zap.Int("response#status", res.Status),
 					zap.String("response#reason", res.Reason),
@@ -296,7 +296,7 @@ func (tc *trendingConsumer) Consume(delivery rmq.Delivery) {
 					zap.String("subreddit#name", subreddit.NormalizedName()),
 					zap.String("post#id", post.ID),
 					zap.Int64("post#score", post.Score),
-					zap.String("device#token", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 					zap.Int64("median_score", medianScore),
 				)
 			}

@@ -297,18 +297,18 @@ func (nc *notificationsConsumer) Consume(delivery rmq.Delivery) {
 				_ = nc.statsd.Incr(push.ErrorsMetric(device), []string{}, 1)
 				logger.Error("failed to send notification",
 					zap.Error(err),
-					zap.String("device#token", device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(device.APNSToken)),
 				)
 			} else if !res.Sent {
 				_ = nc.statsd.Incr(push.ErrorsMetric(device), []string{}, 1)
 				logger.Error("notification not sent",
-					zap.String("device#token", device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(device.APNSToken)),
 					zap.Int("response#status", res.Status),
 					zap.String("response#reason", res.Reason),
 				)
 			} else {
 				_ = nc.statsd.Incr(push.SentMetric(device), []string{}, 1)
-				logger.Info("sent notification", zap.String("device#token", device.APNSToken))
+				logger.Info("sent notification", zap.String("device#token_fingerprint", tokenFingerprint(device.APNSToken)))
 			}
 
 			// An APNs rejection means the device is gone or notifications

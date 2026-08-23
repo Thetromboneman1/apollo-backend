@@ -1,16 +1,30 @@
 x-app-env: &app-env
-  env_file: .env.docker
+  env_file: ${APOLLO_ENV_FILE:-.env.docker}
+  environment:
+    DATABASE_URL: "postgres://apollo:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apollo?sslmode=disable"
+    DATABASE_CONNECTION_POOL_URL: "postgres://apollo:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@pgbouncer:6432/apollo"
 
 x-app-volumes: &app-volumes
   - ./secrets:/etc/secrets:ro
 
 x-worker: &worker
-  build:
-    context: .
-    dockerfile: Dockerfile
-  image: ${APOLLO_IMAGE:-ghcr.io/apollo-reborn/apollo-backend:latest}
+  image: "${APOLLO_IMAGE:?APOLLO_IMAGE must be set to an immutable image digest}"
+  pull_policy: if_not_present
   <<: *app-env
   volumes: *app-volumes
+  read_only: true
+  init: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 128m
+  pids_limit: 256
+  networks:
+    - backend
+    - egress
   depends_on:
     pgbouncer:
       condition: service_started
@@ -18,8 +32,6 @@ x-worker: &worker
       condition: service_healthy
     redis-locks:
       condition: service_healthy
-    statsd:
-      condition: service_started
     migrate:
       condition: service_completed_successfully
   restart: unless-stopped
@@ -31,13 +43,20 @@ x-worker: &worker
 
 services:
   postgres:
-    image: postgres:14-alpine
+    image: postgres:15.19-alpine3.24
     environment:
       POSTGRES_USER: apollo
-      POSTGRES_PASSWORD: apollo
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
       POSTGRES_DB: apollo
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    restart: unless-stopped
+    shm_size: 128m
+    mem_limit: 768m
+    pids_limit: 256
+    stop_grace_period: 60s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U apollo -d apollo"]
       interval: 5s
@@ -45,14 +64,14 @@ services:
       retries: 10
 
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.25.2-p0
     environment:
-      DATABASE_URL: postgres://apollo:apollo@postgres:5432/apollo
+      DATABASE_URL: "postgres://apollo:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apollo"
       LISTEN_PORT: "6432"
       POOL_MODE: transaction
-      DEFAULT_POOL_SIZE: "178"
-      MAX_CLIENT_CONN: "4096"
-      MIN_POOL_SIZE: "8"
+      DEFAULT_POOL_SIZE: "20"
+      MAX_CLIENT_CONN: "200"
+      MIN_POOL_SIZE: "2"
       RESERVE_POOL_TIMEOUT: "1"
       SERVER_RESET_QUERY: DISCARD ALL
       AUTH_TYPE: scram-sha-256
@@ -60,10 +79,36 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    mem_limit: 64m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
 
   redis-queue:
-    image: redis:7-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    image: redis:7.4.11-bookworm
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis_queue_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    mem_limit: 160m
+    pids_limit: 96
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -71,32 +116,41 @@ services:
       retries: 10
 
   redis-locks:
-    image: redis:7-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    image: redis:7.4.11-bookworm
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis_locks_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    mem_limit: 160m
+    pids_limit: 96
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  # No-op UDP sink for statsd. The Datadog client crashes if STATSD_URL is
-  # unreachable, but it doesn't care what's actually on the other end.
-  statsd:
-    image: alpine:3.19
-    entrypoint: /statsd.sh
-    volumes:
-      - ./docker/statsd.sh:/statsd.sh:ro
-    expose:
-      - "8125/udp"
-
   migrate:
     # Loads docs/schema.sql (matches CI). The step migrations in migrations/
     # have a known bug: 000006 and 000008 both create the same index, so
     # `migrate up` fails on a clean DB. schema.sql is the authoritative
     # consolidated schema.
-    image: postgres:14-alpine
+    image: postgres:15.19-alpine3.24
     environment:
-      PGPASSWORD: apollo
+      PGPASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
     entrypoint: /migrate.sh
     volumes:
       - ./docs/schema.sql:/schema.sql:ro
@@ -106,18 +160,42 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - backend
+    user: "70:70"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 64
     restart: "no"
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ${APOLLO_IMAGE:-ghcr.io/apollo-reborn/apollo-backend:latest}
+    image: "${APOLLO_IMAGE:?APOLLO_IMAGE must be set to an immutable image digest}"
+    pull_policy: if_not_present
     command: ["api"]
     <<: *app-env
     volumes: *app-volumes
-    ports:
-      - "4000:4000"
+    read_only: true
+    init: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    pids_limit: 256
+    expose:
+      - "4000"
+    networks:
+      - frontend
+      - backend
+      - egress
     depends_on:
       pgbouncer:
         condition: service_started
@@ -125,8 +203,6 @@ services:
         condition: service_healthy
       redis-locks:
         condition: service_healthy
-      statsd:
-        condition: service_started
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
@@ -136,20 +212,48 @@ services:
       timeout: 3s
       retries: 5
 
+  # Public-deployment origin boundary. cloudflared connects only to the
+  # loopback host publication below; the Go API remains private to the Compose
+  # network. The gateway supplies request-size/time/concurrency limits that the
+  # application server does not currently enforce itself.
+  origin-gateway:
+    image: nginx:1.30.4-alpine3.24
+    volumes:
+      - ./docs/deployment/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:4000:8080"
+    networks:
+      - frontend
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m,uid=101,gid=101,mode=0700
+      - /var/run:rw,noexec,nosuid,size=4m,uid=101,gid=101,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    pids_limit: 128
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/v1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
   # Self-hosted Bark relay for free-sideload notification delivery (Bark
   # devices registered with transport=bark). Opt-in via the "bark" profile:
   #
-  #   docker compose --profile bark up -d --build
-  #
-  # (--build because plain `up` reuses the previously built app image —
-  # after a `git pull` you'd silently keep running the old code.)
-  #
-  # Setup: in the Bark iOS app add this server (http://<host>:8080 or your
-  # reverse-proxied URL) — the app registers itself and shows a device key;
-  # the Bark Push URL to paste into Apollo's settings is then
-  # <server>/<device_key>. The URL stored on the device row must be reachable
-  # FROM the worker containers (a LAN IP or public hostname, not
-  # "localhost"). Delivery to the phone still rides Apple's push
+  # Setup: put the loopback relay behind a separate HTTPS hostname, then add
+  # that server in the Bark iOS app. The app registers itself and shows a
+  # device key; the Bark Push URL to paste into Apollo's settings is then
+  # <server>/<device_key>. That public URL must be reachable from both the
+  # phone and worker containers. Delivery to the phone still rides Apple's push
   # infrastructure via Bark's own certificate baked into bark-server, so no
   # Apple Developer account is needed. Device registrations live in
   # barkdata (bolt DB) — persist it or every app reinstall needs re-adding
@@ -165,10 +269,21 @@ services:
     image: finab/bark-server:v2.3.5
     profiles: ["bark"]
     ports:
-      - "${BARK_SERVER_PORT:-8080}:8080"
+      - "127.0.0.1:${BARK_SERVER_PORT:-8080}:8080"
     volumes:
       - barkdata:/data
+    networks:
+      - egress
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 160m
+    pids_limit: 128
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 30s
@@ -179,37 +294,47 @@ services:
     <<: *worker
     command: ["scheduler"]
     container_name: apollo-scheduler
+    networks:
+      - backend
 
   worker-notifications:
     <<: *worker
-    command: ["worker", "--queue", "notifications", "--consumers", "64"]
+    command: ["worker", "--queue", "notifications", "--consumers", "8"]
     container_name: apollo-worker-notifications
 
   worker-stuck-notifications:
     <<: *worker
-    command: ["worker", "--queue", "stuck-notifications", "--consumers", "16"]
+    command: ["worker", "--queue", "stuck-notifications", "--consumers", "2"]
     container_name: apollo-worker-stuck-notifications
 
   worker-subreddits:
     <<: *worker
-    command: ["worker", "--queue", "subreddits", "--consumers", "32"]
+    command: ["worker", "--queue", "subreddits", "--consumers", "4"]
     container_name: apollo-worker-subreddits
 
   worker-trending:
     <<: *worker
-    command: ["worker", "--queue", "trending", "--consumers", "16"]
+    command: ["worker", "--queue", "trending", "--consumers", "2"]
     container_name: apollo-worker-trending
 
   worker-users:
     <<: *worker
-    command: ["worker", "--queue", "users", "--consumers", "16"]
+    command: ["worker", "--queue", "users", "--consumers", "2"]
     container_name: apollo-worker-users
 
   worker-live-activities:
     <<: *worker
-    command: ["worker", "--queue", "live-activities", "--consumers", "16"]
+    command: ["worker", "--queue", "live-activities", "--consumers", "2"]
     container_name: apollo-worker-live-activities
 
 volumes:
   pgdata:
   barkdata:
+  redis_queue_data:
+  redis_locks_data:
+
+networks:
+  frontend:
+  backend:
+    internal: true
+  egress:

@@ -151,7 +151,7 @@ func (lac *liveActivitiesConsumer) Consume(delivery rmq.Delivery) {
 	}()
 
 	at := delivery.Payload()
-	logger := lac.logger.With(zap.String("live_activity#apns_token", at))
+	logger := lac.logger.With(zap.String("live_activity#token_fingerprint", tokenFingerprint(at)))
 	key := fmt.Sprintf("locks:live-activities:%s", at)
 
 	defer func() {

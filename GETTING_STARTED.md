@@ -99,7 +99,7 @@ The backend ships as a set of Docker containers, so the only thing you install o
 itself. Pick your platform.
 
 <details open>
-<summary><strong>macOS</strong></summary>
+<summary><strong>macOS</strong> (local testing only for this deployment)</summary>
 
 1. Download **Docker Desktop** from
    [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) (choose the
@@ -121,11 +121,19 @@ itself. Pick your platform.
 <details>
 <summary><strong>Linux</strong> (recommended for an always-on server)</summary>
 
-1. Install Docker Engine + the Compose plugin with the official convenience script:
+1. Install Docker Engine and Compose from Docker's signed Debian repository:
    ```bash
-   curl -fsSL https://get.docker.com | sh
+   sudo apt-get update
+   sudo apt-get install -y ca-certificates curl
+   sudo install -m 0755 -d /etc/apt/keyrings
+   sudo curl -fsSL https://download.docker.com/linux/debian/gpg      -o /etc/apt/keyrings/docker.asc
+   sudo chmod a+r /etc/apt/keyrings/docker.asc
+   . /etc/os-release
+   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" |      sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+   sudo apt-get update
+   sudo apt-get install -y docker-ce docker-ce-cli containerd.io      docker-buildx-plugin docker-compose-plugin
    ```
-   (Or follow your distro's instructions at [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).)
+   The full distro list is at [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
 2. Let your user run Docker without `sudo`:
    ```bash
    sudo usermod -aG docker $USER
@@ -144,7 +152,7 @@ itself. Pick your platform.
 </details>
 
 <details>
-<summary><strong>Windows</strong></summary>
+<summary><strong>Windows</strong> (local testing only for this deployment)</summary>
 
 Install **Docker Desktop** with the **WSL 2** backend — follow
 [docs.docker.com/desktop/install/windows-install](https://docs.docker.com/desktop/install/windows-install/).
@@ -165,17 +173,12 @@ git clone https://github.com/Apollo-Reborn/apollo-backend
 cd apollo-backend
 ```
 
-You **do not need Go or any build tools** — the app image is built *inside* Docker from the code
-you just cloned (that's what the `--build` in `make docker-up` does). Building this way keeps the
-running containers in sync with your checkout: after a `git pull`, the next `make docker-up`
-rebuilds automatically.
+You do not need Go for a local Docker build. `make docker-up` runs an explicit `docker build`,
+tags it `apollo-backend:local`, and starts Compose with `--no-build`.
 
-> **Prefer the prebuilt image?** One is published to GitHub Container Registry
-> (`ghcr.io/apollo-reborn/apollo-backend:latest`, the compose file's default tag — override with
-> `APOLLO_IMAGE`): run `docker compose pull` and then plain `docker compose up -d` (no `--build`).
-> Two caveats: the registry image is only published from `main` (unmerged branches aren't in it),
-> and without `--build` a `git pull` alone never changes what's running — you must `pull` again.
-> Most people should just use `make docker-up`.
+Production does not build from a live checkout. It requires an exact signed GHCR digest in
+`APOLLO_IMAGE` and deploys through `scripts/deploy-cloudflare.sh`. Tags such as `latest` are
+rejected. See [the Debian VM production runbook](docs/CLOUDFLARE_DEPLOYMENT.md).
 
 ---
 
@@ -270,12 +273,14 @@ error naming what's missing. (Leaving all four empty is the [Bark guide](GETTING
 
 | Variable | Set it to |
 |---|---|
-| `APPLE_KEY_PATH` | `/etc/secrets/apple.p8` — where the compose stack mounts the key from [4a](#4a-drop-the-apns-key-into-the-project). |
+| `APOLLO_IMAGE` | Production only: the exact signed GHCR digest. Local Make targets override it with `apollo-backend:local`. |
+| `POSTGRES_PASSWORD` | At least 32 URL-safe random characters. Compose derives every database URL from it. |
+| `APPLE_KEY_PATH` | `/etc/secrets/apple.p8`, where Compose mounts the key from [4a](#4a-drop-the-apns-key-into-the-project). |
 | `APPLE_KEY_ID` | Your Key ID from [3c](#3c-create-an-apns-auth-key-the-p8-file) (e.g. `ABC123XYZ9`). |
 | `APPLE_TEAM_ID` | Your Team ID from [3d](#3d-find-your-team-id) (e.g. `A1B2C3D4E5`). |
 | `APPLE_APNS_TOPIC` | **Your bundle ID** (e.g. `com.yourname.Apollo`). ⚠️ Never `com.christianselig.Apollo` — Reddit blocks it, so every Reddit call gets a 403. |
 | `APPLE_APNS_SANDBOX` | `true` — sideloaded builds signed with a development certificate need the **sandbox** APNs gateway. Leaving this off is the most common cause of `BadDeviceToken`. |
-| `REGISTRATION_SECRET` | A long random string of your choosing (e.g. the output of `openssl rand -hex 24`). This stops strangers from registering against your backend. Optional on a private LAN, **strongly recommended before you expose anything to the internet** ([Step 8](#8-optional-open-it-up-to-the-internet)). |
+| `REGISTRATION_SECRET` | A random string of at least 32 characters (for example, the output of `openssl rand -hex 32`). The public deployment runner requires it and fails closed if it is missing or still a placeholder. |
 
 **About the Reddit credentials (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REDIRECT_URI`,
 `REDDIT_USER_AGENT`):** you almost certainly already configured these inside the tweak's **Custom
@@ -287,10 +292,9 @@ here too. If you do, the **User Agent must follow Reddit's format**, including y
 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps); see the
 [tweak's README](https://github.com/Apollo-Reborn/Apollo-Reborn) for the recommended setup.
 
-**Leave these defaults alone** (they're already correct for the bundled stack):
-- The Postgres and Redis URLs point at the built-in containers. ⚠️ Don't append a query string (like
-  `?sslmode=disable`) to `DATABASE_CONNECTION_POOL_URL` — the app appends its own `?pool_max_conns=…`
-  and a second `?` makes the database driver reject the URL.
+Compose supplies the Postgres and Redis URLs. Do not add duplicate database URLs to the Docker
+environment file. Non-Compose runs still need `DATABASE_CONNECTION_POOL_URL` without a query string
+because the app adds its own pool option.
 
 ---
 
@@ -299,12 +303,11 @@ here too. If you do, the **User Agent must follow Reddit's format**, including y
 Bring the whole stack up in the background:
 
 ```bash
-make docker-up      # same as: docker compose up -d --build
+make docker-up      # builds apollo-backend:local, then starts with --no-build
 ```
 
-(The `--build` matters: plain `docker compose up` reuses the app image it built last time, so after
-a `git pull` you'd silently keep running the old code. A rebuild with nothing changed takes
-seconds thanks to layer caching.)
+The Make target rebuilds the local app image before starting Compose. Production pulls a signed
+digest and never builds from the live checkout.
 
 Then follow the logs until things settle:
 
@@ -352,13 +355,11 @@ On your iPhone, in Apollo (with the tweak installed):
 
 1. Go to **Settings → Custom API → Notification Backend**.
 2. Set:
-   - **Backend URL**:
-     - For testing on the **same Wi-Fi** as the server: `http://<server-lan-ip>:4000`
-       (find the server's LAN IP with `ipconfig getifaddr en0` on macOS or `hostname -I` on Linux).
-     - Once you've [exposed it to the internet](#8-optional-open-it-up-to-the-internet): your
-       `https://your.domain` URL.
-   - **Registration Token**: the same value you set for `REGISTRATION_SECRET` (leave blank if you
-     didn't set one).
+   - **Backend URL**: your public `https://your.domain` URL. The bundled gateway listens only on
+     the server's loopback interface, so complete [Step 8](#8-optional-open-it-up-to-the-internet)
+     before testing from the phone.
+   - **Registration Token**: the same value you set for `REGISTRATION_SECRET`. Production does
+     not allow this value to be blank.
 3. Tap **Test Connection**. This hits `GET /v1/health` on your backend — a success here means the
    app can reach it.
 
@@ -475,17 +476,15 @@ count, and score — as APNs `liveactivity` pushes.
 
 ## 8. (Optional) Open it up to the internet
 
-So far the backend only works while your phone is on the **same network** as the server. For
-notifications to keep arriving when you're on cellular or away from home, the backend needs to be
-reachable from the internet.
+So far only the server itself can reach the loopback gateway. The phone needs a public HTTPS
+endpoint before it can register or receive notifications from this backend.
 
 > **Before you expose anything:**
 > - **Set `REGISTRATION_SECRET`** (Step 4b) so randoms can't register against your backend, then put
 >   the same value in the app's **Registration Token** field.
 > - **Use HTTPS.** The examples below all terminate TLS for you.
-> - The bundled `docker-compose.yml` only publishes port **4000** (the database and Redis stay
->   private). Don't expose port 4000 raw — put a reverse proxy in front of it so traffic is
->   encrypted.
+> - The bundled stack publishes its limited origin gateway only on `127.0.0.1:4000`. The Go API,
+>   database, and Redis stay private to Docker. Do not change the host bind to `0.0.0.0`.
 
 Pick **one** of the three approaches below. If you have a domain name and a few dollars a month, a
 VPS (8a) is the most reliable. If you want to run it from home without renting anything, Cloudflare
@@ -535,28 +534,26 @@ Run it on a machine at home and let the router pass internet traffic to it.
 > If forwarding 80/443 doesn't work no matter what you try, you're probably behind CGNAT; use
 > **Cloudflare Tunnel (8c)** instead, which doesn't need any inbound ports.
 
-### 8c. Cloudflare Tunnel (no port-forward, works behind CGNAT)
+### 8c. Remotely managed Cloudflare Tunnel for apollo.connerclan.com
 
-A free option that makes an *outbound* connection from your server to Cloudflare, so you never open
-a port or need a static IP. You need a domain managed in a (free) Cloudflare account.
+A free option that makes an outbound connection from your server to Cloudflare, so you never open
+a router port or need a static IP. The production Debian VM steps, token handling, systemd setup,
+validation, persistence, backup, and rollback are in
+[docs/CLOUDFLARE_DEPLOYMENT.md](docs/CLOUDFLARE_DEPLOYMENT.md).
 
 1. Add your domain to [Cloudflare](https://dash.cloudflare.com/) (free plan is fine) and point your
    registrar's nameservers at Cloudflare.
 2. Install `cloudflared` on the server:
    [developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
-3. Authenticate and create a tunnel:
-   ```bash
-   cloudflared tunnel login
-   cloudflared tunnel create apollo
-   ```
-4. Route a hostname to your local API and run it:
-   ```bash
-   cloudflared tunnel route dns apollo apollo.yourdomain.com
-   cloudflared tunnel run --url http://localhost:4000 apollo
-   ```
-   (For an always-on setup, install it as a service: `sudo cloudflared service install`.) Cloudflare
-   handles TLS, so there's no Caddy and no open ports.
-5. Backend URL becomes `https://apollo.yourdomain.com`.
+3. In Cloudflare Zero Trust, create or select the remotely managed tunnel `apollo-mac-mini`. Add Public Hostname
+   `apollo.connerclan.com` with service `HTTP` and origin URL `http://127.0.0.1:4000`.
+4. Install the dashboard-provided connector token as the locked Debian systemd service in the
+   [production runbook](docs/CLOUDFLARE_DEPLOYMENT.md#4-install-the-cloudflare-systemd-service).
+   The connector uses a mode-600 token file, not `cert.pem`, local ingress YAML, or a tunnel
+   credential JSON. Cloudflare handles TLS, so there is no Caddy and no open router port.
+5. Run `scripts/deploy-cloudflare.sh`. The production runner always checks the public endpoint.
+   Backend URL becomes
+   `https://apollo.connerclan.com`.
 
 ### After exposing it
 
@@ -570,22 +567,14 @@ to your new `https://` address, tap **Test Connection**, and re-run a
 
 Notifications only arrive while the backend is up, so a little durability work pays off.
 
-**Survive reboots.** The compose services already declare `restart: unless-stopped`, so Docker
-restarts them automatically after a crash or a reboot — *as long as the Docker daemon itself starts
-on boot.* On Linux: `sudo systemctl enable docker`. On macOS: enable "Start Docker Desktop when you
-sign in" (Step 1). If you exposed via Cloudflare Tunnel, also install `cloudflared` as a service so
-it comes back too.
+**Survive reboots.** Compose uses `restart: unless-stopped`, but Docker and the tunnel must also
+start at boot. On Debian, enable Docker and the supplied cloudflared systemd unit. The ConnerClan
+deployment also starts its VirtualBox VM on the Mini. See the
+[production runbook](docs/CLOUDFLARE_DEPLOYMENT.md#8-reboot-persistence).
 
-**Back up your data.** The `pgdata` Docker volume holds every device and account registration. Take
-periodic snapshots:
-
-```bash
-# Back up
-docker compose exec postgres pg_dump -U apollo apollo > apollo-backup-$(date +%F).sql
-
-# Restore (into a running, empty database)
-cat apollo-backup-YYYY-MM-DD.sql | docker compose exec -T postgres psql -U apollo apollo
-```
+**Back up your data.** The `pgdata` volume holds device and account registrations. Use
+`scripts/backup-deployment.sh` so the database dump, image archive, configuration, running-state
+manifest, and checksums stay together. Install the supplied systemd timer for daily backups.
 
 > ⚠️ `make docker-nuke` runs `docker compose down -v`, which **deletes the `pgdata` volume and all
 > your data.** Use `make docker-down` (no `-v`) for an ordinary stop that preserves data.
@@ -624,7 +613,7 @@ the order you'd hit them:
 |---|---|---|
 | `curl .../v1/health` refuses the connection | Containers still starting, or one crashed | Wait a few seconds; then `make docker-logs` to see what failed |
 | `api` / worker containers restart-loop | *Partial* `APPLE_*` config (some set, some missing), or the `.p8` isn't at `secrets/apple.p8` | Read the exact error in `make docker-logs`; set all four `APPLE_*` vars (all-empty is the [Bark guide](GETTING_STARTED_BARK.md)'s mode, not this one), then `make docker-up` |
-| App's **Test Connection** fails, but `curl localhost:4000/v1/health` works on the server | Phone can't reach the server: wrong IP/port, different network, or firewall | Use the server's LAN IP (not `localhost`); confirm phone and server are on the same Wi-Fi (or finish [Step 8](#8-optional-open-it-up-to-the-internet)) |
+| App's **Test Connection** fails, but `curl localhost:4000/v1/health` works on the server | The local gateway is healthy, but the phone has no working public HTTPS route | Finish [Step 8](#8-optional-open-it-up-to-the-internet), then use that HTTPS URL in Apollo |
 | Device registers, but **no push ever arrives** | Free Apple account (no push entitlement), or wildcard profile instead of an explicit App ID | Use a paid account and the explicit App ID with Push enabled ([Step 3](#3-set-up-apple-app-id-apns-key-team-id)), or switch to the free [Bark path](GETTING_STARTED_BARK.md) |
 | `BadDeviceToken` in the logs | APNs sandbox/production mismatch | Set `APPLE_APNS_SANDBOX=true` and restart |
 | `403 "blocked by network security"` HTML on Reddit calls | Bundle ID / User-Agent still contains `com.christianselig.Apollo` | Re-sign under your own bundle ID; fix `APPLE_APNS_TOPIC` and the tweak's User Agent |
@@ -632,8 +621,8 @@ the order you'd hit them:
 | First inbox message didn't notify | Expected warmup behavior | The second message onward push; or run the `UPDATE accounts SET check_count = 1` shortcut ([7c](#7c-the-first-message-warmup-gotcha)) |
 | Push works on Wi-Fi but **not on cellular** | Backend isn't reachable from the internet | Complete [Step 8](#8-optional-open-it-up-to-the-internet) |
 | Live Activity starts but never updates | `POST /v1/live_activities` got a 422 (account not registered yet, or the backend is in Bark-only mode — Live Activities require APNs) or 401 (tweak build too old to send the registration token on this path), or `BadDeviceToken` on the push (sandbox mismatch) | Check `docker compose logs api worker-live-activities`; register the account first, update the tweak, or fix `APPLE_APNS_SANDBOX` ([7d](#7d-optional-verify-live-activities)) |
-| HTTPS certificate won't issue (Caddy) | DNS not yet pointing at the host, or ports 80/443 not reachable from outside | Confirm the A record resolves to your IP and that 80/443 are forwarded/open; behind CGNAT, use [Cloudflare Tunnel](#8c-cloudflare-tunnel-no-port-forward-works-behind-cgnat) |
-| Port-forwarding never works no matter what | You're behind CGNAT | Use [Cloudflare Tunnel](#8c-cloudflare-tunnel-no-port-forward-works-behind-cgnat) |
+| HTTPS certificate won't issue (Caddy) | DNS not yet pointing at the host, or ports 80/443 not reachable from outside | Confirm the A record resolves to your IP and that 80/443 are forwarded/open; behind CGNAT, use the [Cloudflare deployment](docs/CLOUDFLARE_DEPLOYMENT.md) |
+| Port-forwarding never works no matter what | You're behind CGNAT | Use the [Cloudflare deployment](docs/CLOUDFLARE_DEPLOYMENT.md) |
 
 For the rarer, deeper failure modes (TLS fingerprint EOFs, the JWT column-length migration, the
 `raw_json` WAF quirk), see the [Troubleshooting table in the README](README.md#troubleshooting).

@@ -270,7 +270,7 @@ func (uc *usersConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("user#id", id),
 					zap.String("user#name", user.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("apns", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 					zap.Int("response#status", res.Status),
 					zap.String("response#reason", res.Reason),
 				)
@@ -280,7 +280,7 @@ func (uc *usersConsumer) Consume(delivery rmq.Delivery) {
 					zap.Int64("user#id", id),
 					zap.String("user#name", user.NormalizedName()),
 					zap.String("post#id", post.ID),
-					zap.String("device#token", watcher.Device.APNSToken),
+					zap.String("device#token_fingerprint", tokenFingerprint(watcher.Device.APNSToken)),
 				)
 			}
 		}

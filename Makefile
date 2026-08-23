@@ -1,5 +1,7 @@
 BREW_PREFIX  ?= $(shell brew --prefix)
 DATABASE_URL ?= "postgres://$(USER)@localhost/apollo_test?sslmode=disable"
+APOLLO_IMAGE ?= apollo-backend:local
+COMPOSE      = APOLLO_IMAGE=$(APOLLO_IMAGE) docker compose --env-file .env.docker
 
 test:
 	@DATABASE_URL=$(DATABASE_URL) go test -race -timeout 1s ./...
@@ -17,34 +19,33 @@ $(BREW_PREFIX)/bin/migrate:
 	@brew install golang-migrate
 
 docker-build:
-	docker compose build
+	docker build --pull --tag $(APOLLO_IMAGE) .
 
-# --build: `docker compose up` alone reuses whatever app image was built
-# last, so after a `git pull` you'd silently keep running the old code.
-# With layer caching a no-change rebuild takes seconds.
-docker-up:
-	docker compose up -d --build
+# These targets are for local development only. Production uses the
+# digest-pinned image and scripts/deploy-cloudflare.sh.
+docker-up: docker-build
+	$(COMPOSE) up -d --no-build
 
 # Also start the self-hosted Bark relay for free-sideload notification
 # delivery (see README "Bark transport").
-docker-up-bark:
-	docker compose --profile bark up -d --build
+docker-up-bark: docker-build
+	$(COMPOSE) --profile bark up -d --no-build
 
 # --profile bark so a bark-server started via docker-up-bark is torn down
 # too; harmless when it was never started.
 docker-down:
-	docker compose --profile bark down
+	$(COMPOSE) --profile bark down
 
 docker-logs:
-	docker compose logs -f --tail=100
+	$(COMPOSE) logs -f --tail=100
 
 docker-migrate:
-	docker compose run --rm migrate
+	$(COMPOSE) run --rm migrate
 
 docker-psql:
-	docker compose exec postgres psql -U apollo apollo
+	$(COMPOSE) exec postgres psql -U apollo apollo
 
 docker-nuke:
-	docker compose --profile bark down -v
+	$(COMPOSE) --profile bark down -v
 
 .PHONY: all build deps lint test docker-build docker-up docker-up-bark docker-down docker-logs docker-migrate docker-psql docker-nuke

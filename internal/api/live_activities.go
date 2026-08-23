@@ -3,21 +3,21 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
-	"go.uber.org/zap"
-
 	"github.com/christianselig/apollo-backend/internal/domain"
+	"github.com/christianselig/apollo-backend/internal/reddit"
 )
 
 // liveActivityRequest is the payload Apollo posts when it starts a Live
-// Activity for a thread. The OAuth tokens it carries are accepted but unused:
-// the worker polls Reddit through the registered account row (which also
-// holds the per-account Reddit client credentials), so the account is the
-// single source of truth for tokens.
+// Activity for a thread. AccessToken proves that the caller controls the
+// requested Reddit account. The worker still polls Reddit through the
+// registered account row, which remains the source of truth for refresh tokens
+// and per-account Reddit client credentials.
 type liveActivityRequest struct {
 	APNSToken       string `json:"apns_token"`
 	RedditAccountID string `json:"reddit_account_id"`
@@ -72,15 +72,6 @@ func (a *api) createLiveActivityHandler(w http.ResponseWriter, r *http.Request) 
 	// fullname in case the client sends one.
 	rid := strings.TrimPrefix(req.RedditAccountID, "t2_")
 
-	if _, err := a.accountRepo.GetByRedditID(ctx, rid); err != nil {
-		a.logger.Info("live activity registration for unknown account",
-			zap.String("account#reddit_account_id", req.RedditAccountID),
-			zap.Error(err),
-		)
-		a.errorResponse(w, r, 422, fmt.Errorf("account not registered with this backend; open Apollo with notifications configured first"))
-		return
-	}
-
 	// Same gateway-selection logic as device registration: the client's flag
 	// is a hint, APPLE_APNS_SANDBOX pins it to match the build's signing.
 	dev := req.Development || req.SandboxReceipt != ""
@@ -98,6 +89,35 @@ func (a *api) createLiveActivityHandler(w http.ResponseWriter, r *http.Request) 
 
 	if err := la.Validate(); err != nil {
 		a.errorResponse(w, r, 422, err)
+		return
+	}
+
+	accessToken := strings.TrimSpace(req.AccessToken)
+	if accessToken == "" {
+		a.errorResponse(w, r, http.StatusUnauthorized, fmt.Errorf("Reddit authorization is required"))
+		return
+	}
+	if a.redditIdentity == nil {
+		a.errorResponse(w, r, http.StatusServiceUnavailable, fmt.Errorf("Reddit identity verification is unavailable"))
+		return
+	}
+
+	identity, err := a.redditIdentity.MeWithAccessToken(ctx, accessToken)
+	if err != nil {
+		if errors.Is(err, reddit.ErrOauthRevoked) {
+			a.errorResponse(w, r, http.StatusUnauthorized, fmt.Errorf("Reddit authorization is invalid"))
+		} else {
+			a.errorResponse(w, r, http.StatusBadGateway, fmt.Errorf("Reddit identity verification failed"))
+		}
+		return
+	}
+	if identity == nil || strings.TrimPrefix(identity.ID, "t2_") != rid {
+		a.errorResponse(w, r, http.StatusUnauthorized, fmt.Errorf("Reddit authorization does not match the requested account"))
+		return
+	}
+
+	if _, err := a.accountRepo.GetByRedditID(ctx, rid); err != nil {
+		a.errorResponse(w, r, http.StatusUnprocessableEntity, fmt.Errorf("account not registered with this backend; open Apollo with notifications configured first"))
 		return
 	}
 

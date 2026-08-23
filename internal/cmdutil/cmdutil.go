@@ -9,7 +9,6 @@ import (
 
 	"github.com/DataDog/datadog-go/statsd"
 	"github.com/adjust/rmq/v5"
-	"github.com/go-redis/redis/extra/redisotel/v8"
 	"github.com/go-redis/redis/v8"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -110,8 +109,6 @@ func newRedisClient(ctx context.Context, env string, maxConns int) (*redis.Clien
 	if err := client.Ping(ctx).Err(); err != nil {
 		return nil, err
 	}
-
-	client.AddHook(redisotel.NewTracingHook())
 
 	return client, nil
 }

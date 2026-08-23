@@ -2,6 +2,8 @@
 
 A self-hostable fork of [`christianselig/apollo-backend`](https://github.com/christianselig/apollo-backend), the archived Go service that powered push notifications, inbox checks, and subreddit/user watchers for the original [Apollo for Reddit](https://apolloapp.io/) iOS app.
 
+For the production Debian VM on ConnerClan-Mini at `apollo.connerclan.com`, use the [loopback-only Cloudflare deployment runbook](docs/CLOUDFLARE_DEPLOYMENT.md). Apollo does not run on the MacBook. The runbook covers fail-closed authentication, immutable images, Bark origin policy, systemd, backups, bounded deployment, and rollback.
+
 <p align="center">
   <img src="images/IMG_4294.jpg" width="270"
        alt="Private message push notification from a self-hosted Apollo backend on the iOS lock screen">
@@ -37,22 +39,22 @@ The upstream backend was deeply tied to Christian's App Store deployment. This f
 - **APNs gateway configurable** via `APPLE_APNS_SANDBOX`. Apollo's release-signed binary always sent `sandbox=false` (it was App Store production); sideloaded builds signed under a dev cert need sandbox APNs, and pinning this per deployment avoids `BadDeviceToken` errors and the worker's aggressive auto-delete on receipt of one. The notifications worker now picks its APNs gateway from `device.Sandbox` per-device, rather than the now-vestigial `account.Development` flag.
 - **Reddit OAuth credentials are per-account**, stored on `accounts.reddit_client_id` / `reddit_client_secret` / `reddit_redirect_uri` / `reddit_user_agent`. Installed-app credentials (empty `client_secret`) are accepted. If the tweak doesn't manage to inject them on a given registration (it can't reach bodies attached to upload-tasks), the API falls back to `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` / `REDDIT_REDIRECT_URI` / `REDDIT_USER_AGENT` env vars on the API process.
 - **CamelCase registration payloads accepted.** Apollo's iOS client posts `accessToken` / `refreshToken`, not the snake_case shape upstream documented. The handler accepts both.
-- **Bark transport for free-account sideloads.** `POST /v1/device` accepts two new optional fields: `transport` (`apns`, the default, or `bark`) and `transport_endpoint` (the device's Bark push URL, e.g. `https://api.day.app/<device_key>` or a self-hosted [bark-server](https://github.com/Finb/bark-server)). The same values are also accepted as `X-Apollo-Transport` / `X-Apollo-Transport-Endpoint` headers, which win over the body — the tweak sends headers because Apollo posts `/v1/device` as an upload task whose body the request rewrite can't always reach. Bark devices carry a tweak-generated synthetic 64-hex token in place of an APNs token; every send site (`internal/push`) routes per-device, translating the APNs payload into a Bark JSON POST whose `url` field deep-links back into Apollo (`apollo://reddit.com/r/<sub>/comments/<post_id>` for anything with a post, `apollo://reborn/inbox` for private messages). Three things to know: the Bark push URL is a **bearer capability** — anyone with DB access can push to that phone; notification content transits the Bark relay (api.day.app or your bark-server) plus Apple's push infrastructure **in plaintext** — self-host bark-server if that matters to you; and the push URL is a registrant-supplied address the workers POST to, so on an open-registration deployment it's an **SSRF vector** toward anything the workers can reach (the sender refuses to follow redirects, but set `REGISTRATION_SECRET` before exposing the API to untrusted networks). Bark delivery failures are logged (`bark.notification.errors` in statsd) but never delete the device row, unlike APNs rejections. Live Activities remain APNs-only.
+- **Bark transport for free-account sideloads.** `POST /v1/device` accepts two new optional fields: `transport` (`apns`, the default, or `bark`) and `transport_endpoint` (the device's Bark push URL, e.g. `https://api.day.app/<device_key>` or a self-hosted [bark-server](https://github.com/Finb/bark-server)). The same values are also accepted as `X-Apollo-Transport` / `X-Apollo-Transport-Endpoint` headers, which win over the body — the tweak sends headers because Apollo posts `/v1/device` as an upload task whose body the request rewrite can't always reach. Bark devices carry a tweak-generated synthetic 64-hex token in place of an APNs token; every send site (`internal/push`) routes per-device, translating the APNs payload into a Bark JSON POST whose `url` field deep-links back into Apollo (`apollo://reddit.com/r/<sub>/comments/<post_id>` for anything with a post, `apollo://reborn/inbox` for private messages). Three things to know: the Bark push URL is a **bearer capability** — anyone with DB access can push to that phone; notification content transits the Bark relay (api.day.app or your bark-server) plus Apple's push infrastructure **in plaintext** — self-host bark-server if that matters to you; and the registrant-supplied destination is constrained by `BARK_ALLOWED_ORIGINS`, comprehensive public-address checks, numeric dialing after DNS validation, disabled proxies, and refused redirects. Upstream response bodies and bearer URLs never enter returned errors or logs. Bark delivery failures are logged (`bark.notification.errors` in statsd) but never delete the device row, unlike APNs rejections. Live Activities remain APNs-only.
 
   A self-hosted [bark-server](https://github.com/Finb/bark-server) ships in `docker-compose.yml` behind the opt-in `bark` profile:
 
   ```bash
-  docker compose --profile bark up -d --build
+  make docker-up-bark
   ```
 
   A Bark-only deployment needs no Apple credentials at all: leave every `APPLE_*` var empty and the services start with APNs disabled — Bark devices work normally, APNs device registrations and Live Activity registrations are rejected with a 422, and any leftover APNs-destined send logs an error instead of delivering.
 
-  It listens on port 8080 (`BARK_SERVER_PORT` to change) and stores device registrations in the `barkdata` volume. Point the Bark iOS app at it (add server → `http://<host>:8080` or your reverse-proxied HTTPS URL); the app registers itself and shows a device key, and the Bark Push URL for Apollo's settings is `<server>/<device_key>`. That URL must be reachable **from the worker containers** — use a LAN IP or public hostname, never `localhost`. Delivery to the phone still rides Apple's push infrastructure via Bark's own certificate baked into bark-server, so no Apple Developer account is involved. Self-hosting keeps notification content off api.day.app, at the cost of exposing one more port; the hosted api.day.app works fine too if you'd rather not.
+  It listens on loopback port 8080 (`BARK_SERVER_PORT` to change) and stores device registrations in the `barkdata` volume. Put it behind a separate HTTPS hostname before adding it to the Bark iOS app. The app registers itself and shows a device key, and the Bark Push URL for Apollo's settings is `<server>/<device_key>`. That public URL must be reachable from both the phone and worker containers. Delivery to the phone still rides Apple's push infrastructure via Bark's own certificate baked into bark-server, so no Apple Developer account is involved. Self-hosting keeps notification content off api.day.app, at the cost of publishing one more HTTPS hostname; the hosted api.day.app works fine too if you'd rather not.
 
   Bark notifications carry Apollo's iconography instead of Bark's: pushes with a post thumbnail show the thumbnail, and everything else (PMs, comment replies) falls back to Apollo's app icon, hosted in the [Apollo-Reborn repo](https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/assets/bark-icons) (`BARK_DEFAULT_ICON` env var overrides the fallback URL). When the user has picked an alternate app icon in Apollo, the tweak pins that icon's PNG via an `?icon=` query parameter on the registered push URL — bark-server gives query parameters priority over the JSON body, so their chosen icon shows on every notification, thumbnails included.
 
   Apollo's notification sounds can come along too, with one manual step. Native pushes always say `sound=traloop.wav` and Apollo's bundled notification service extension swaps in the sound picked in-app — that extension never runs for Bark deliveries, and the Bark app can only play its own built-ins or `.caf` files imported into it. The backend forwards the payload's sound name (`traloop`), and the tweak pins the in-app pick via `?sound=` on the push URL; to actually hear them, import the matching `.caf` from [Apollo-Reborn's assets/bark-sounds](https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/assets/bark-sounds) into the Bark app — Service tab → the "Alert Sound" card → "Click here to view all available sounds." → **Upload Sound** (files are named by Apollo's internal sound ids, e.g. `diabolicalDoorbell.caf`). Sounds that aren't imported fall back to the default iOS alert tone, so skipping this step breaks nothing.
-- **Registration endpoints gated** by the optional `REGISTRATION_SECRET` env var.
+- **Every non-health endpoint authenticated** by `REGISTRATION_SECRET`. Production startup fails closed when the secret is absent. The only bypass requires both `ENV=development` and `APOLLO_UNSAFE_ALLOW_MISSING_REGISTRATION_SECRET=1` and is intended for isolated local development.
 - **StatsD is optional** — a `NoOpClient` is wired in when `STATSD_URL` is unset (formerly crashed at startup).
 - **Diagnostic stubs for Apollo's three legacy hosts**: `/api/req_v2`, `/api/announcement`, `/v1/receipt[/{apns}]`. Returns permissive responses so the tweak's host-rewrite doesn't strand the client on dead endpoints. The receipt stub hardcodes Pro + Ultra as owned.
 - **JWT-format access tokens supported.** Token columns widened from `varchar(64)` to `text` — Reddit switched to JWTs (~1100 chars) sometime after the original backend was archived.
@@ -80,9 +82,11 @@ $EDITOR .env.docker   # APNs: fill in APPLE_KEY_PATH, APPLE_KEY_ID, APPLE_TEAM_I
                       # Bark-only: leave all APPLE_* empty
                       # Both: REDDIT_* fallbacks, REGISTRATION_SECRET
 
-# 3. Bring it up
-make docker-up               # or: docker compose --profile bark up -d --build
-make docker-logs             # follow output until health check passes
+# 3. Bring up a local development build
+make docker-up               # use make docker-up-bark to self-host Bark
+make docker-logs             # follow output until health checks pass
+
+# Production uses scripts/deploy-cloudflare.sh and a digest-pinned GHCR image.
 ```
 
 Verify the API is reachable:
@@ -92,13 +96,15 @@ curl http://localhost:4000/v1/health
 # {"status":"available"}
 ```
 
-You should now be able to point the tweak at `http://<your-host>:4000` (or your reverse-proxied HTTPS URL) and hit **Test Connection**.
+The host publication is loopback-only. Point the tweak at a public HTTPS URL routed to this gateway, then hit **Test Connection**. For ConnerClan-Mini production, use the linked Debian VM runbook.
 
 ## Required environment variables
 
 | Var | Purpose |
 |---|---|
-| `DATABASE_CONNECTION_POOL_URL` | Postgres URL (via PgBouncer in transaction mode). **No query string** — `cmdutil.NewDatabasePool` appends `?pool_max_conns=…` and a second `?` makes pgx reject the URL. |
+| `APOLLO_IMAGE` | Production only: immutable GHCR reference in `image@sha256:digest` form. Tags are rejected. Local Make targets override this with `apollo-backend:local`. |
+| `POSTGRES_PASSWORD` | Docker deployment password. Compose derives the direct and PgBouncer URLs from it so services cannot drift. |
+| `DATABASE_CONNECTION_POOL_URL` | Non-Compose runs only: Postgres URL through PgBouncer. Do not add a query string because `cmdutil.NewDatabasePool` appends its own pool option. |
 | `REDIS_QUEUE_URL` | Redis backing rmq job queues. Configure `noeviction`. |
 | `REDIS_LOCKS_URL` | Redis backing the dedup locks (Lua script in `scheduler.go`). Can be the same instance as the queue Redis. |
 
@@ -113,20 +119,18 @@ Set **all four** to deliver over APNs, or leave **all four** empty to run in Bar
 | `APPLE_TEAM_ID` | Your Apple Developer team ID. |
 | `APPLE_APNS_TOPIC` | Bundle ID of the sideloaded Apollo build (e.g. `com.you.Leto`). Used as `apns-topic` on every push. **Must not be `com.christianselig.Apollo`** — see [Before you start](#before-you-start). |
 
-## Optional environment variables
+## Production security and optional environment variables
 
 | Var | Default | Effect |
 |---|---|---|
 | `APPLE_APNS_SANDBOX` | unset | Set to `true` to override Apollo's `sandbox=false` registrations and route pushes through `api.sandbox.push.apple.com`. Required for sideloaded builds signed under a dev cert. Ignored in Bark-only mode. |
 | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REDIRECT_URI`, `REDDIT_USER_AGENT` | unset | Fallback OAuth credentials used when the tweak fails to inject them per-account at registration time. Single-tenant deployments can set these and skip per-account configuration entirely. |
-| `REGISTRATION_SECRET` | unset | If set, registration endpoints require `X-Registration-Token: <value>`. Off by default for local/private-network use. |
+| `REGISTRATION_SECRET` | required outside explicit unsafe development | Every non-health endpoint requires `X-Registration-Token: <value>`. Production startup and `scripts/deploy-cloudflare.sh` fail closed when it is missing; the deployment script also rejects short or placeholder values. |
+| `BARK_ALLOWED_ORIGINS` | `https://api.day.app` in the template | Exact comma-separated Bark origins. Scheme, lowercase host, and effective port must match. The sender enforces this policy, and `scripts/validate-deployment.sh` checks persisted rows without printing bearer URLs. |
+| `PUBLIC_URL` | `https://apollo.connerclan.com` | Canonical public URL used by the deployment validator. |
 | `STATSD_URL` | unset | If set, emits metrics to the given UDP endpoint. If unset, all metrics no-op. |
-| `ENV` | `development` | Tags logs and (when present) the statsd `env:` tag. |
+| `ENV` | `production` in the Docker template | Tags logs and (when present) the statsd `env:` tag. |
 | `PORT` | `4000` | API HTTP port. |
-| `HONEYCOMB_API_KEY` / `OTEL_*` | unset | OpenTelemetry tracing via Honeycomb's launcher; no-op when unset. |
-
-> [!TIP]
-> Quiet the OTLP exporter's reconnect spam in local dev by exporting `OTEL_TRACES_EXPORTER=none` and `OTEL_METRICS_EXPORTER=none`.
 
 ## Pointing the tweak at your instance
 
@@ -134,8 +138,8 @@ In the tweak (Apollo on-device): **Settings > Custom API > Notification Backend*
 
 | Tweak field | Value |
 |---|---|
-| **Backend URL** | `https://your-backend.example.com` (or `http://10.0.0.5:4000` for LAN). Leave empty to keep notifications silently dropped. |
-| **Registration Token** | Same value as your backend's `REGISTRATION_SECRET`. Leave empty if you didn't set one. |
+| **Backend URL** | Your public HTTPS endpoint, such as `https://apollo.connerclan.com`. The bundled host port is loopback-only. Leave empty to keep notifications silently dropped. |
+| **Registration Token** | Same value as your backend's `REGISTRATION_SECRET`. Public and production deployments must not leave it empty. |
 
 Tap **Test Connection** to verify the tweak can reach `GET /v1/health`.
 
@@ -148,16 +152,16 @@ Make sure the **Reddit API Key**, **Redirect URI**, and **User Agent** in the tw
 
 Installed-app Reddit credentials are accepted — just leave the **Reddit API Secret** field blank in the tweak.
 
-What the tweak does once the URL is set: it intercepts any request Apollo makes to the three dead legacy hosts (`apollopushserver.xyz`, `beta.apollonotifications.com`, `apolloreq.com`) and rewrites the scheme/host/port to your backend. The receipt-bypass module also intercepts Apollo's StoreKit receipt read so the per-account inbox-notifications toggle works on sideloaded builds (which have no App Store receipt). Everything else (path, query, method, other headers, payload) passes through unchanged.
+What the tweak does once the URL is set: it intercepts any request Apollo makes to the three dead legacy hosts (`apollopushserver.xyz`, `beta.apollonotifications.com`, `apolloreq.com`) and rewrites the scheme/host/port to your backend. It attaches the configured registration token to every rewritten request, including reads, deletes, receipts, and diagnostics. The receipt-bypass module also intercepts Apollo's StoreKit receipt read so the per-account inbox-notifications toggle works on sideloaded builds (which have no App Store receipt). Everything else (path, query, method, other headers, payload) passes through unchanged.
 
 ## Verifying end-to-end
 
 After the toggle, walk through this checklist:
 
 ```bash
-# 1. Device row created with sandbox=true
+# 1. Device row created without printing its APNs/Bark capability token
 docker compose exec postgres psql -U apollo -d apollo -c \
-  "SELECT id, sandbox, apns_token FROM devices ORDER BY id DESC LIMIT 1;"
+  "SELECT id, sandbox, transport, length(apns_token) AS token_length FROM devices ORDER BY id DESC LIMIT 1;"
 
 # 2. Account registered, associated with device, inbox_notifiable=true
 docker compose exec postgres psql -U apollo -d apollo -c "
@@ -165,9 +169,9 @@ docker compose exec postgres psql -U apollo -d apollo -c "
   FROM accounts a
   JOIN devices_accounts da ON da.account_id = a.id;"
 
-# 3. Test push delivered
-curl -X POST http://localhost:4000/v1/device/<apns-token>/test/post_reply
-# Expect: 200 and a push on the phone.
+# 3. In Apollo, use Notification Backend > Test Connection, then use the
+# notification test control. Avoid putting capability tokens or the shared
+# registration secret in shell history.
 ```
 
 The first inbox message after registration won't trigger a notification — the worker's warmup logic at `internal/worker/notifications.go:274` silently sets `last_message_id` and `check_count=1` on the first poll. The second message and onward push normally. If you want to skip warmup, run:
@@ -185,7 +189,7 @@ Three cobra subcommands of the single `apollo` binary, each typically run as its
 - `apollo scheduler` — single-instance ticker. Every 5s claims-and-reschedules due accounts/subreddits/users with `UPDATE … SET next_check_at = $next WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED LIMIT N) RETURNING id` and publishes the IDs onto rmq queues.
 - `apollo worker --queue <name> --consumers <n>` — consumes one rmq queue. Queue names: `live-activities`, `notifications`, `stuck-notifications`, `subreddits`, `trending`, `users`.
 
-Two Redis instances on purpose: one for rmq queues (`noeviction`), one for short-lived `SET key NX EX` dedup locks consulted by a Lua script the scheduler loads at startup.
+Two Redis instances are used on purpose: one for rmq queues and one for short-lived `SET key NX EX` dedup locks. Docker deployment persists both with AOF and uses `noeviction`.
 
 Every process serves pprof on `localhost:6060`; the scheduler also serves `:8080` for health.
 

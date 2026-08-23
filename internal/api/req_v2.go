@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 
 	"go.uber.org/zap"
@@ -11,10 +10,9 @@ import (
 // reqV2Handler is a diagnostic stub for `POST /api/req_v2`. Apollo iOS
 // posts to this endpoint repeatedly (originally against apolloreq.com,
 // rewritten to this backend by the tweak). The endpoint shape is not
-// public — we log the request body and return a permissive empty
-// response so the client doesn't treat the absence of one as a failure.
+// public, so the bounded body is discarded and a permissive empty response is
+// returned. Request contents are never logged.
 func (a *api) reqV2Handler(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.Copy(io.Discard, r.Body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
@@ -32,8 +30,6 @@ func (a *api) reqV2Handler(w http.ResponseWriter, r *http.Request) {
 // 6e4b485^). Product names mirror the strings Apollo's binary checks
 // against (apollo_pro_*, apollo_ultra).
 func (a *api) checkReceiptHandler(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.Copy(io.Discard, r.Body)
-
 	type product struct {
 		Name             string `json:"name"`
 		Status           string `json:"status"`
@@ -70,16 +66,13 @@ func (a *api) announcementHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// notFoundLogger is mux's NotFoundHandler. It logs every unmatched path
-// so we can discover other endpoints Apollo expects.
+// notFoundLogger intentionally records neither request body nor raw path. An
+// unmatched request can contain credentials or device tokens, and it does not
+// have a safe route template to log.
 func (a *api) notFoundLogger(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
 	a.logger.Info("unmatched route",
 		zap.String("method", r.Method),
-		zap.String("path", r.URL.Path),
-		zap.String("content_type", r.Header.Get("Content-Type")),
-		zap.Int("body_bytes", len(body)),
-		zap.ByteString("body", body),
+		zap.String("route", "unmatched"),
 	)
 	http.NotFound(w, r)
 }

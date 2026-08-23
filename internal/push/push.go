@@ -9,9 +9,7 @@ package push
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
-	"time"
 
 	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/payload"
@@ -26,7 +24,6 @@ type Sender struct {
 	apnsProd    *apns2.Client
 	apnsSandbox *apns2.Client
 	topic       string
-	httpClient  *http.Client
 	// barkDefaultIcon is the image URL sent as the Bark `icon` when the
 	// notification has no post thumbnail, so PMs and comment replies show
 	// Apollo's icon instead of Bark's. Devices whose push URL pins ?icon=
@@ -68,19 +65,8 @@ func NewSender(logger *zap.Logger, key *token.Token, topic string) *Sender {
 		icon = defaultBarkIcon
 	}
 	s := &Sender{
-		logger: logger,
-		topic:  topic,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-			// The push URL is registrant-supplied, so a redirect could bounce
-			// the POST (and its notification content) to an address the
-			// registrant doesn't control the appearance of — an SSRF vector on
-			// open-registration deployments. bark-server never redirects, so
-			// surface the 3xx as a failed send instead of following it.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		logger:          logger,
+		topic:           topic,
 		barkDefaultIcon: icon,
 	}
 	if key != nil {

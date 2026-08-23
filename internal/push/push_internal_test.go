@@ -1,8 +1,7 @@
 package push
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"net/netip"
 	"testing"
 
 	"github.com/sideshow/apns2/payload"
@@ -27,6 +26,25 @@ func TestNewSender_NilTokenBarkOnly(t *testing.T) {
 	assert.Nil(t, s.apnsSandbox)
 }
 
+func TestSend_BarkWorksWithNilAPNSTokenAndApprovedOrigin(t *testing.T) {
+	t.Parallel()
+
+	p, err := newBarkDestinationPolicy(
+		"http://bark.example",
+		staticBarkResolver{"bark.example": {netip.MustParseAddr("93.184.216.34")}},
+		pipeBarkDialer("HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n{\"code\":200,\"message\":\"success\"}"),
+	)
+	require.NoError(t, err)
+
+	s := NewSender(zap.NewNop(), nil, "")
+	res, err := s.sendBarkWithPolicy(t.Context(), domain.Device{
+		Transport:         domain.DeviceTransportBark,
+		TransportEndpoint: "http://bark.example/device-key",
+	}, payload.NewPayload().AlertTitle("hi"), p)
+	require.NoError(t, err)
+	assert.True(t, res.Sent)
+}
+
 func TestSendAPNS_NilClientDoesNotUnregister(t *testing.T) {
 	t.Parallel()
 
@@ -41,21 +59,4 @@ func TestSendAPNS_NilClientDoesNotUnregister(t *testing.T) {
 		assert.False(t, res.Sent)
 		assert.False(t, res.ShouldUnregister)
 	}
-}
-
-func TestSend_BarkStillWorksWithNilToken(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"code":200,"message":"success"}`))
-	}))
-	defer srv.Close()
-
-	s := NewSender(zap.NewNop(), nil, "")
-	s.httpClient = srv.Client()
-	d := domain.Device{Transport: domain.DeviceTransportBark, TransportEndpoint: srv.URL}
-
-	res, err := s.Send(t.Context(), d, payload.NewPayload().AlertTitle("hi"))
-	require.NoError(t, err)
-	assert.True(t, res.Sent)
 }

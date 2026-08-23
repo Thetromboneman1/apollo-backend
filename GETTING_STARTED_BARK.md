@@ -100,7 +100,7 @@ The backend ships as a set of Docker containers, so the only thing you install o
 itself. Pick your platform.
 
 <details open>
-<summary><strong>macOS</strong></summary>
+<summary><strong>macOS</strong> (local testing only for this deployment)</summary>
 
 1. Download **Docker Desktop** from
    [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) (choose the
@@ -122,11 +122,19 @@ itself. Pick your platform.
 <details>
 <summary><strong>Linux</strong> (recommended for an always-on server)</summary>
 
-1. Install Docker Engine + the Compose plugin with the official convenience script:
+1. Install Docker Engine and Compose from Docker's signed Debian repository:
    ```bash
-   curl -fsSL https://get.docker.com | sh
+   sudo apt-get update
+   sudo apt-get install -y ca-certificates curl
+   sudo install -m 0755 -d /etc/apt/keyrings
+   sudo curl -fsSL https://download.docker.com/linux/debian/gpg      -o /etc/apt/keyrings/docker.asc
+   sudo chmod a+r /etc/apt/keyrings/docker.asc
+   . /etc/os-release
+   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" |      sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+   sudo apt-get update
+   sudo apt-get install -y docker-ce docker-ce-cli containerd.io      docker-buildx-plugin docker-compose-plugin
    ```
-   (Or follow your distro's instructions at [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).)
+   The full distro list is at [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
 2. Let your user run Docker without `sudo`:
    ```bash
    sudo usermod -aG docker $USER
@@ -145,7 +153,7 @@ itself. Pick your platform.
 </details>
 
 <details>
-<summary><strong>Windows</strong></summary>
+<summary><strong>Windows</strong> (local testing only for this deployment)</summary>
 
 Install **Docker Desktop** with the **WSL 2** backend — follow
 [docs.docker.com/desktop/install/windows-install](https://docs.docker.com/desktop/install/windows-install/).
@@ -166,10 +174,12 @@ git clone https://github.com/Apollo-Reborn/apollo-backend
 cd apollo-backend
 ```
 
-You **do not need Go or any build tools** — the app image is built *inside* Docker from the code
-you just cloned (that's what the `--build` in `make docker-up-bark` does). Building this way keeps
-the running containers in sync with your checkout: after a `git pull`, the next
-`make docker-up-bark` rebuilds automatically.
+You do not need Go for a local Docker build. `make docker-up-bark` runs an explicit
+`docker build`, tags it `apollo-backend:local`, and starts Compose with `--no-build`.
+
+Production uses a signed digest-pinned GHCR image and `scripts/deploy-cloudflare.sh`. The
+ConnerClan-Mini deployment uses hosted Bark and does not enable the self-hosted Bark profile. See
+[the Debian VM production runbook](docs/CLOUDFLARE_DEPLOYMENT.md).
 
 ---
 
@@ -185,8 +195,11 @@ Now open `.env.docker` in any text editor. The Bark path needs almost nothing:
 
 | Variable | Set it to |
 |---|---|
-| `APPLE_KEY_PATH`, `APPLE_KEY_ID`, `APPLE_TEAM_ID`, `APPLE_APNS_TOPIC` | **Leave all four empty.** That's what puts the backend in **Bark-only mode** — APNs stays disabled, no Apple credentials or `.p8` key are needed, and the `secrets/` folder can stay nonexistent. (Setting only *some* of the four is a startup error; all-empty is the supported free configuration.) |
-| `REGISTRATION_SECRET` | A long random string of your choosing (e.g. the output of `openssl rand -hex 24`). This stops strangers from registering against your backend. Optional on a private LAN, **strongly recommended before you expose anything to the internet** ([Step 9](#9-optional-open-it-up-to-the-internet)). |
+| `APOLLO_IMAGE` | Production only: exact signed GHCR digest. Local Make targets override it with `apollo-backend:local`. |
+| `POSTGRES_PASSWORD` | At least 32 URL-safe random characters. Compose derives all database URLs from it. |
+| `APPLE_KEY_PATH`, `APPLE_KEY_ID`, `APPLE_TEAM_ID`, `APPLE_APNS_TOPIC` | **Leave all four empty.** That's what puts the backend in **Bark-only mode**. APNs stays disabled, no Apple credentials or `.p8` key are needed, and the `secrets/` folder can stay empty. Setting only some of the four is a startup error. |
+| `REGISTRATION_SECRET` | A random string of at least 32 characters. It is required by the public deployment runner, which fails closed if it is missing or still a placeholder. |
+| `BARK_ALLOWED_ORIGINS` | Exact comma-separated Bark origins. Use `https://api.day.app` for hosted Bark. Add a self-hosted relay with its exact scheme, hostname, and non-default port when needed. The sender and validator normalize effective ports and reject nonmatching origins. |
 
 **About the Reddit credentials (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REDIRECT_URI`,
 `REDDIT_USER_AGENT`):** you almost certainly already configured these inside the tweak's **Custom
@@ -208,15 +221,15 @@ here too. If you do, the **User Agent must follow Reddit's format**, including y
 Bring the whole stack up in the background, **including the self-hosted Bark relay**:
 
 ```bash
-make docker-up-bark      # same as: docker compose --profile bark up -d --build
+make docker-up-bark      # builds apollo-backend:local, then starts with --no-build
 ```
 
 > **Planning to use Bark's hosted `api.day.app` instead of self-hosting the relay?** (See the
 > trade-off in [Step 5](#5-set-up-the-bark-app--get-your-push-url).) Then you don't need the relay
 > container — plain `make docker-up` is enough. Everything else in this guide is the same.
 
-(The `--build` matters: plain `docker compose up` reuses the app image it built last time, so after
-a `git pull` you'd silently keep running the old code. A rebuild with nothing changed takes
+The Make target rebuilds the local app image before starting Compose, so after a `git pull` the
+running binary stays in sync with the checkout. A rebuild with nothing changed takes
 seconds thanks to layer caching.)
 
 Then follow the logs until things settle:
@@ -275,12 +288,10 @@ from the App Store, then decide where your notifications will relay through:
 **Self-hosted:**
 
 1. In the Bark app, go to the **service list / server screen** and **add a server**.
-2. Enter your relay's address: `http://<server-lan-ip>:8080` while testing on your home network
-   (find the server's LAN IP with `ipconfig getifaddr en0` on macOS or `hostname -I` on Linux), or
-   your public HTTPS URL once you've [exposed it](#9-optional-open-it-up-to-the-internet).
-   ⚠️ Not `localhost` — this address must be reachable both **from your phone** (to register) and
-   **from the backend's containers** (to deliver).
-3. The app registers itself and shows your **push URL**: `http://<server>:8080/<device-key>`.
+2. Enter the separate public HTTPS hostname you routed to the relay in
+   [Step 9](#9-optional-open-it-up-to-the-internet). The bundled port is loopback-only, so a LAN IP
+   or `localhost` will not work from the phone or worker containers.
+3. The app registers itself and shows your **push URL**: `https://<relay-host>/<device-key>`.
    Copy it — you'll paste it into Apollo in the next step.
 
 **Hosted `api.day.app`:**
@@ -300,12 +311,10 @@ On your iPhone, in Apollo (with the tweak installed):
 
 1. Go to **Settings → Custom API → Notification Backend**.
 2. Set:
-   - **Backend URL**:
-     - For testing on the **same Wi-Fi** as the server: `http://<server-lan-ip>:4000`.
-     - Once you've [exposed it to the internet](#9-optional-open-it-up-to-the-internet): your
-       `https://your.domain` URL.
-   - **Registration Token**: the same value you set for `REGISTRATION_SECRET` (leave blank if you
-     didn't set one).
+   - **Backend URL**: the public `https://your.domain` URL created in
+     [Step 9](#9-optional-open-it-up-to-the-internet). The bundled gateway is loopback-only.
+   - **Registration Token**: the same value you set for `REGISTRATION_SECRET`. Production does
+     not allow this value to be blank.
 3. Tap **Test Connection**. This hits `GET /v1/health` on your backend — a success here means the
    app can reach it.
 4. Turn on **Bark Delivery** and paste your push URL from [Step 5](#5-set-up-the-bark-app--get-your-push-url)
@@ -413,10 +422,8 @@ app icon otherwise — including the alternate icon you've selected in Apollo, i
 
 ## 9. (Optional) Open it up to the internet
 
-So far everything works while your phone is on the **same network** as the server. For
-notifications to keep working when you're on cellular or away from home, your **backend** (port
-4000) needs to be reachable from the internet — and if you self-host `bark-server`, ideally that
-too (port 8080), so the Bark app can stay registered from anywhere.
+So far only the server itself can reach the loopback ports. The phone needs a public HTTPS route to
+the backend, and a separate public HTTPS hostname for `bark-server` if you self-host the relay.
 
 The options — a VPS with a Caddy reverse proxy, a home server with port-forwarding + dynamic DNS,
 or a Cloudflare Tunnel (the easiest from home, and the only one that works behind CGNAT) — are
@@ -428,10 +435,13 @@ a second hostname or route for port `8080` if you self-host the relay.
 
 Two Bark-specific notes:
 
-- **Set `REGISTRATION_SECRET` before exposing anything** ([Step 3](#3-configure-your-environment))
-  — on the Bark path this matters *extra*, because a device's push URL is an address your workers
-  will POST to. Open registration on a public backend would let a stranger point your workers at
-  arbitrary URLs.
+- **Set `REGISTRATION_SECRET` before exposing anything** ([Step 3](#3-configure-your-environment)).
+  Production startup fails closed without it. Bark destinations are also restricted by the exact
+  `BARK_ALLOWED_ORIGINS` policy and public-address validation before any network connection.
+- Keep `BARK_ALLOWED_ORIGINS` limited to the exact relay origins you use, then run
+  `scripts/validate-deployment.sh --with-bark --public` after every Bark URL change. The current Go
+  sender enforces the list at delivery time, while the validator catches bad persisted endpoints
+  before they reach a worker. The registration secret is still required.
 - After exposing, update the **Bark app's server address** and re-paste the new `https://…/<device-key>`
   push URL into Apollo's **Bark Push URL**, then update Apollo's **Backend URL** — all three move
   to the public hostname.
@@ -453,11 +463,11 @@ the order you'd hit them:
 |---|---|---|
 | `curl .../v1/health` refuses the connection | Containers still starting, or one crashed | Wait a few seconds; then `make docker-logs` to see what failed |
 | `api` / worker containers restart-loop | A *partial* `APPLE_*` config (some set, some empty) | Read the exact error in `make docker-logs`; for the Bark path, empty **all four** `APPLE_*` vars, then `make docker-up-bark` |
-| App's **Test Connection** fails, but `curl localhost:4000/v1/health` works on the server | Phone can't reach the server: wrong IP/port, different network, or firewall | Use the server's LAN IP (not `localhost`); confirm phone and server are on the same Wi-Fi (or finish [Step 9](#9-optional-open-it-up-to-the-internet)) |
+| App's **Test Connection** fails, but `curl localhost:4000/v1/health` works on the server | The local gateway is healthy, but the phone has no working public HTTPS route | Finish [Step 9](#9-optional-open-it-up-to-the-internet), then use that HTTPS URL in Apollo |
 | **Test Bark Notification** does nothing | Wrong push URL, Bark app not allowed to notify, or the phone can't reach the relay | Re-copy the push URL from the Bark app; check **iOS Settings → Bark → Notifications**; confirm the relay address isn't `localhost` |
-| In-app test works, but the [Step 7b](#7b-send-a-test-push) `curl` test doesn't | The **backend containers** can't reach your push URL (the phone reaching it isn't enough) | Use a LAN IP or public hostname in the push URL, never `localhost`; check `docker compose logs worker-notifications` for `bark` errors |
+| In-app test works, but the [Step 7b](#7b-send-a-test-push) `curl` test doesn't | The **backend containers** can't reach your push URL (the phone reaching it isn't enough) | Use the relay's public hostname in the push URL, never a LAN IP or `localhost`; check `docker compose logs worker-notifications` for `bark` errors |
 | Device row has `transport = apns` instead of `bark` | **Bark Delivery** was off (or the push URL empty) when Apollo registered | Turn on **Bark Delivery**, paste the **Bark Push URL**, relaunch Apollo, re-check the `devices` row |
-| Registration fails with `401` | **Registration Token** in the app doesn't match `REGISTRATION_SECRET` | Make them identical (or clear both while testing on a private LAN) |
+| Registration fails with `401` | **Registration Token** in the app doesn't match `REGISTRATION_SECRET` | Make them identical. The public runner does not allow an empty registration secret. |
 | Registration fails with `422` | Bark device registered without a push URL | Fill in **Bark Push URL** before relaunching |
 | `403 "blocked by network security"` HTML on Reddit calls | Bundle ID / User-Agent still contains `com.christianselig.Apollo` | Re-sign under your own bundle ID; fix the tweak's User Agent |
 | `oauth revoked` right after a *successful* token refresh | User Agent missing the `(by /u/yourname)` suffix | Use a UA like `ios:com.yourname.Apollo:v1.0 (by /u/you)` |
