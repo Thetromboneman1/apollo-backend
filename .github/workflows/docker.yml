@@ -83,7 +83,10 @@ jobs:
         run: |
           ref="$IMAGE@$DIGEST"
           printf '%s\n' "$ref" | tee "$RUNNER_TEMP/APOLLO_IMAGE.txt"
-          sha256sum "$RUNNER_TEMP/APOLLO_IMAGE.txt" > "$RUNNER_TEMP/APOLLO_IMAGE.txt.sha256"
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum APOLLO_IMAGE.txt > APOLLO_IMAGE.txt.sha256
+          )
           {
             echo "### Immutable deployment image"
             echo

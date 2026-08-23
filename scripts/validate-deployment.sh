@@ -8,9 +8,11 @@ env_file="$repo_dir/.env.docker"
 with_bark=0
 public_check=0
 config_only=0
+expected_runtime_image_id=""
+expected_runtime_image_reference=""
 
 usage() {
-  echo "usage: $0 [--env-file PATH] [--with-bark] [--public] [--config-only]" >&2
+  echo "usage: $0 [--env-file PATH] [--with-bark] [--public] [--config-only] [--expected-runtime-image-id SHA256_ID --expected-runtime-image-reference IMMUTABLE_REFERENCE]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -23,12 +25,40 @@ while [[ $# -gt 0 ]]; do
     --with-bark) with_bark=1; shift ;;
     --public) public_check=1; shift ;;
     --config-only) config_only=1; shift ;;
+    --expected-runtime-image-id)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      expected_runtime_image_id="$2"
+      shift 2
+      ;;
+    --expected-runtime-image-reference)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      expected_runtime_image_reference="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
 done
 
 [[ -f "$env_file" ]] || { echo "missing environment file: $env_file" >&2; exit 1; }
+if [[ -n "$expected_runtime_image_id" && ! "$expected_runtime_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "expected runtime image ID must be a lowercase sha256 image ID" >&2
+  exit 2
+fi
+if [[ -n "$expected_runtime_image_reference" &&
+      ! "$expected_runtime_image_reference" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
+  echo "expected runtime image reference must be an immutable lowercase GHCR digest reference" >&2
+  exit 2
+fi
+if [[ -n "$expected_runtime_image_id" && -z "$expected_runtime_image_reference" ]] ||
+   [[ -z "$expected_runtime_image_id" && -n "$expected_runtime_image_reference" ]]; then
+  echo "runtime image ID and immutable reference must be provided together" >&2
+  exit 2
+fi
+if [[ $config_only -eq 1 && -n "$expected_runtime_image_id" ]]; then
+  echo "runtime image override cannot be used with --config-only" >&2
+  exit 2
+fi
 
 if env_mode="$(stat -f '%Lp' "$env_file" 2>/dev/null)"; then
   :
@@ -219,16 +249,36 @@ if bindings:
 # Docker records the exact local image object used to create it. Require both
 # to match so a stale or manually substituted application image cannot pass
 # validation merely because the rendered Compose model is correct.
-expected_image_id="$(docker image inspect --format '{{.Id}}' "$apollo_image")"
-[[ -n "$expected_image_id" ]] || { echo "pinned application image is not present locally" >&2; exit 1; }
+if [[ -n "$expected_runtime_image_id" ]]; then
+  expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_runtime_image_id" 2>/dev/null)" || {
+    echo "expected rollback application image is not present locally" >&2
+    exit 1
+  }
+  [[ "$expected_image_id" == "$expected_runtime_image_id" ]] || {
+    echo "expected rollback application image ID does not match the local image" >&2
+    exit 1
+  }
+  expected_image_reference="$expected_runtime_image_id"
+else
+  expected_image_id="$(docker image inspect --format '{{.Id}}' "$apollo_image")"
+  [[ -n "$expected_image_id" ]] || { echo "pinned application image is not present locally" >&2; exit 1; }
+  expected_image_reference="$apollo_image"
+fi
 for service in api scheduler worker-notifications worker-stuck-notifications \
   worker-subreddits worker-trending worker-users worker-live-activities; do
   container_id="$(APOLLO_ENV_FILE="$env_file" "${compose[@]}" ps -q "$service")"
   [[ -n "$container_id" ]] || { echo "$service container is missing" >&2; exit 1; }
   running_image_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
   running_image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
-  if [[ "$running_image_ref" != "$apollo_image" || "$running_image_id" != "$expected_image_id" ]]; then
-    echo "$service is not running the pinned APOLLO_IMAGE" >&2
+  running_image_label="$(docker inspect --format \
+    '{{if .Config.Labels}}{{index .Config.Labels "com.apollo-reborn.deployment.image-reference"}}{{end}}' \
+    "$container_id")"
+  if [[ "$running_image_ref" != "$expected_image_reference" || "$running_image_id" != "$expected_image_id" ]]; then
+    echo "$service is not running the expected application image" >&2
+    exit 1
+  fi
+  if [[ -n "$expected_runtime_image_id" && "$running_image_label" != "$expected_runtime_image_reference" ]]; then
+    echo "$service does not carry the expected immutable deployment reference" >&2
     exit 1
   fi
 done

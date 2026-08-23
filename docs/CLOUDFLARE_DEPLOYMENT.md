@@ -216,11 +216,19 @@ Backups are written outside the checkout to:
 /home/apollo/backups/apollo-backend
 ~~~
 
-Each backup includes a PostgreSQL custom dump, exact Git revision, environment hash, captured Compose inputs, running-service manifest, archived container images, and **SHA256SUMS**. The timer keeps 30 days by default.
+Scheduled, manual, pre-deployment, and rollback safety backups all use this directory by default. Each backup includes a PostgreSQL custom dump, exact Git revision, environment hash, the running immutable Apollo image reference and local image ID, captured Compose inputs, running-service manifest, archived container images, and **SHA256SUMS**. A backup is refused unless every application service is running the same captured image.
 
-Backups contain private application data. Keep the directory owner-only and replicate it to encrypted off-host storage.
+Container bind files retain the modes their runtime users need: Nginx, schema, and migration SQL are readable, and **migrate.sh** is executable.
 
-## 7. Rollback limits
+Backups contain private application data. Keep the directory owner-only. The backup and production data are on the same VM disk, so this is a deployment-recovery copy, not disaster recovery. Replicate the directory to encrypted off-host storage, do not dereference its live **secrets** symlink, verify checksums at the destination, and periodically test a restored copy.
+
+## 7. Recovery behavior and limits
+
+| Operation | Live containers | Live PostgreSQL | Redis |
+| --- | --- | --- | --- |
+| Backup | Unchanged | Read-only dump | Volumes are not captured |
+| **--confirm** | Recreated from captured images | Unchanged | Existing volumes continue |
+| **--confirm --restore-data** | Recreated from captured images | Restored database is activated | Existing volumes continue |
 
 Restore captured images without changing data:
 
@@ -234,9 +242,54 @@ Restore images and PostgreSQL data only when needed:
 scripts/rollback-deployment.sh   /home/apollo/backups/apollo-backend/YYYYMMDDTHHMMSSZ   --confirm --restore-data
 ~~~
 
-Rollback verifies **SHA256SUMS** before loading an image archive. Data restore is tested in a temporary database before activation.
+Rollback verifies **SHA256SUMS**, captured image metadata, bind-file modes, and the complete captured Compose model before loading images or changing the database.
+
+**--restore-data is an activating recovery operation, not a rehearsal.** It restores into a temporary database and verifies that copy, then stops application services, renames the live database, and activates the restored database. The prior **apollo_pre_restore_&lt;timestamp&gt;** database and a new safety backup are retained, but the operation changes live state and interrupts service.
+
+Use a separate scratch database for a non-activating rehearsal:
+
+~~~bash
+cd /home/apollo/src/apollo-backend
+env_file="$PWD/.env.docker"
+backup_dir=/home/apollo/backups/apollo-backend/YYYYMMDDTHHMMSSZ
+restore_db="apollo_restore_rehearsal_$(date -u +%Y%m%d%H%M%S)"
+compose=(docker compose --env-file "$env_file")
+
+cleanup_restore_rehearsal() {
+  APOLLO_ENV_FILE="$env_file" "${compose[@]}" exec -T postgres \
+    dropdb -U apollo --if-exists "$restore_db" >/dev/null
+}
+trap cleanup_restore_rehearsal EXIT INT TERM
+
+APOLLO_ENV_FILE="$env_file" "${compose[@]}" exec -T postgres \
+  createdb -U apollo "$restore_db"
+APOLLO_ENV_FILE="$env_file" "${compose[@]}" exec -T postgres \
+  pg_restore -U apollo -d "$restore_db" --exit-on-error \
+  < "$backup_dir/postgres.dump"
+required_table_count="$(
+  APOLLO_ENV_FILE="$env_file" "${compose[@]}" exec -T postgres \
+    psql -U apollo -d "$restore_db" -v ON_ERROR_STOP=1 -Atq -c \
+    "SELECT count(*)
+     FROM pg_catalog.pg_tables
+     WHERE schemaname = 'public'
+       AND tablename IN (
+         'accounts', 'devices', 'devices_accounts', 'subreddits',
+         'users', 'watchers', 'live_activities'
+       );"
+)"
+[[ "$required_table_count" == "7" ]] || {
+  echo "restore rehearsal is missing required Apollo tables:" \
+    "found $required_table_count of 7" >&2
+  exit 1
+}
+
+cleanup_restore_rehearsal
+trap - EXIT INT TERM
+~~~
 
 The live **.env.docker** and **secrets** directory are intentionally not copied into backups and are not rolled back. The backup contains an owner-only same-host link to the live secrets directory and a hash of the environment used at capture time. Rollback warns when that hash changed and validates the public endpoint after restoration.
+
+The PostgreSQL dump does not capture the **redis_queue_data** or **redis_locks_data** AOF volumes. Activating an older database is therefore not a coordinated point-in-time whole-stack restore. Reconcile queued work and stale locks before declaring data recovery complete.
 
 ## 8. Reboot persistence
 
@@ -286,5 +339,7 @@ Do not paste the registration token or Bark URL into logs or chat. Both are bear
 - Local and public health pass.
 - Missing and wrong credentials return **401**.
 - Oversize requests return **413**.
-- A backup verifies and a restore rehearsal succeeds.
+- A fresh backup verifies and a non-activating scratch restore succeeds.
+- A captured-image rollback succeeds.
+- The canonical digest-pinned deployment is restored and publicly validated after the rollback test.
 - The Mini reboot brings the VM, tunnel, and stack back without a manual login.
