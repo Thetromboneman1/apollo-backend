@@ -68,6 +68,8 @@ func liveActivityPayload(t *testing.T, redditID, accessToken string) *bytes.Read
 }
 
 func TestCreateLiveActivityProvesRedditAccountOwnership(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		requestID    string
@@ -139,6 +141,8 @@ func TestCreateLiveActivityProvesRedditAccountOwnership(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			accountRepo := &liveActivityAccountRepo{account: domain.Account{AccountID: "abc123"}}
 			activityRepo := &liveActivityRepo{}
 			verifier := &fakeRedditIdentityVerifier{identity: tc.identity, err: tc.identityErr}
@@ -157,7 +161,7 @@ func TestCreateLiveActivityProvesRedditAccountOwnership(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/live_activities", liveActivityPayload(t, tc.requestID, tc.accessToken))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/live_activities", liveActivityPayload(t, tc.requestID, tc.accessToken))
 			a.createLiveActivityHandler(rr, req)
 
 			require.Equal(t, tc.wantStatus, rr.Code)

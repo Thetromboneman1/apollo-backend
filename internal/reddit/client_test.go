@@ -53,6 +53,8 @@ func TestAuthenticatedClientObfuscatedToken(t *testing.T) {
 }
 
 func TestMeWithAccessTokenUsesFixedEndpointAndCallerToken(t *testing.T) {
+	t.Parallel()
+
 	const accessToken = "test-caller-access-token"
 	calls := 0
 	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

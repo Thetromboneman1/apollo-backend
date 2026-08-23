@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ func newSecurityTestAPI(logger *zap.Logger) *api {
 }
 
 func authenticatedRequest(method, target string, body io.Reader) *http.Request {
-	req := httptest.NewRequest(method, target, body)
+	req := httptest.NewRequestWithContext(context.Background(), method, target, body)
 	req.Header.Set("X-Registration-Token", testRegistrationSecret)
 	return req
 }
@@ -53,14 +54,15 @@ func TestAllNonHealthRoutesRequireRegistrationToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, httptest.NewRequest(tt.method, tt.target, nil))
+			h.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), tt.method, tt.target, nil))
 			require.Equal(t, http.StatusUnauthorized, rr.Code)
 		})
 	}
 
 	health := httptest.NewRecorder()
-	h.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
+	h.ServeHTTP(health, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/health", nil))
 	require.Equal(t, http.StatusOK, health.Code)
 
 	announcement := httptest.NewRecorder()
@@ -76,14 +78,14 @@ func TestMissingSecretFailsClosedExceptExplicitDevelopmentBypass(t *testing.T) {
 
 	h := newSecurityTestAPI(zap.NewNop()).Routes()
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/announcement", nil))
+	h.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/announcement", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 
 	t.Setenv(registrationSecretEnv, "too-short")
 	require.Error(t, ValidateConfiguration())
 	h = newSecurityTestAPI(zap.NewNop()).Routes()
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/announcement", nil))
+	h.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/announcement", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 
 	t.Setenv("ENV", "development")
@@ -91,14 +93,14 @@ func TestMissingSecretFailsClosedExceptExplicitDevelopmentBypass(t *testing.T) {
 	require.Error(t, ValidateConfiguration())
 	h = newSecurityTestAPI(zap.NewNop()).Routes()
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/announcement", nil))
+	h.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/announcement", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 
 	t.Setenv(registrationSecretEnv, "")
 	require.NoError(t, ValidateConfiguration())
 	h = newSecurityTestAPI(zap.NewNop()).Routes()
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/announcement", nil))
+	h.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/announcement", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 

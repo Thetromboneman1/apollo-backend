@@ -344,7 +344,6 @@ func TestBarkDestinationPolicy_RejectsUnsafeEndpoints(t *testing.T) {
 		"https://169.254.169.254/device",
 		"https://[::1]/device",
 	} {
-		endpoint := endpoint
 		t.Run(endpoint, func(t *testing.T) {
 			t.Parallel()
 			assert.Error(t, p.validateEndpoint(endpoint))
