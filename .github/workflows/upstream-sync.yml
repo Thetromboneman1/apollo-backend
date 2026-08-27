@@ -1,0 +1,110 @@
+name: Fast-forward upstream sync
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Validate and fast-forward main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/apollo_test?sslmode=disable
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: apollo_test
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres -d apollo_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+        ports:
+          - 5432:5432
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.24.x
+          cache: true
+
+      - name: Resolve safe synchronization state
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add authoritative-upstream https://github.com/Apollo-Reborn/apollo-backend.git
+          git fetch --no-tags authoritative-upstream \
+            +refs/heads/main:refs/remotes/authoritative-upstream/main
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+          downstream=$(git rev-parse refs/remotes/origin/main)
+          upstream=$(git rev-parse refs/remotes/authoritative-upstream/main)
+          {
+            echo "downstream=$downstream"
+            echo "upstream=$upstream"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$downstream" == "$upstream" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork main already matches upstream main." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$downstream" "$upstream"; then
+            echo "::error::Fork main has downstream-only history; refusing to merge, rebase, or force-push."
+            {
+              echo "## Upstream sync stopped"
+              echo
+              echo "Fork main is not a fast-forward ancestor of upstream main."
+              echo "No repository refs were changed. Reconcile the divergence through review."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          git switch --force-create sync-candidate "$downstream"
+          git merge --ff-only "$upstream"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Validate upstream candidate
+        if: steps.state.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod verify
+          psql -v ON_ERROR_STOP=1 -f docs/schema.sql "$DATABASE_URL"
+          go test -count=1 -race -timeout 5m ./...
+          go vet ./...
+          go build -trimpath ./cmd/apollo
+          docker build --check .
+
+      - name: Fast-forward fork main
+        if: steps.state.outputs.changed == 'true'
+        shell: bash
+        env:
+          EXPECTED_DOWNSTREAM: ${{ steps.state.outputs.downstream }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          actual_downstream=$(git rev-parse refs/remotes/origin/main)
+          if [[ "$actual_downstream" != "$EXPECTED_DOWNSTREAM" ]]; then
+            echo "::error::Fork main advanced during validation; refusing to push."
+            exit 1
+          fi
+          git push origin HEAD:main

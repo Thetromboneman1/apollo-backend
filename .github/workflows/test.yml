@@ -1,31 +1,64 @@
-on: [push, pull_request]
-name: Unit Tests
+name: Unit tests and Docker validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost/apollo_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/apollo_test?sslmode=disable
     services:
       postgres:
-        image: postgres
+        image: postgres:15-alpine
         env:
           POSTGRES_DB: apollo_test
           POSTGRES_PASSWORD: postgres
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd "pg_isready -U postgres -d apollo_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
         ports:
           - 5432:5432
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
-      with:
-        go-version: 1.24.x
-    - uses: golangci/golangci-lint-action@v6
-      with:
-        version: v1.64.8
-    - run: psql -f docs/schema.sql $DATABASE_URL
-    - run: go test ./... -v -race -timeout 5s
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.24.x
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Load test schema
+        run: psql -v ON_ERROR_STOP=1 -f docs/schema.sql "$DATABASE_URL"
+
+      - name: Unit and race tests
+        run: go test -count=1 -race -timeout 5m ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build server
+        run: go build -trimpath ./cmd/apollo
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
+
+      - name: Validate Dockerfile
+        run: docker build --check .
