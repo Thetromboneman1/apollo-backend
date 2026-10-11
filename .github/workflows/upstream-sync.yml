@@ -17,6 +17,9 @@ jobs:
     name: Validate and fast-forward main
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.state.outputs.changed }}
+      synced_sha: ${{ steps.state.outputs.upstream }}
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/apollo_test?sslmode=disable
     services:
@@ -61,22 +64,31 @@ jobs:
             echo "upstream=$upstream"
           } >> "$GITHUB_OUTPUT"
 
-          if [[ "$downstream" == "$upstream" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Fork main already matches upstream main." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if ! git merge-base --is-ancestor "$downstream" "$upstream"; then
-            echo "::error::Fork main has downstream-only history; refusing to merge, rebase, or force-push."
-            {
-              echo "## Upstream sync stopped"
-              echo
-              echo "Fork main is not a fast-forward ancestor of upstream main."
-              echo "No repository refs were changed. Reconcile the divergence through review."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          state=$(bash scripts/upstream-sync-state.sh "$downstream" "$upstream")
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          case "$state" in
+            equal|upstream-contained)
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "Fork main already contains upstream main ($state); no changes needed." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            fast-forward)
+              ;;
+            diverged)
+              echo "::error::Both branches have unique history; reconcile through review."
+              {
+                echo "## Upstream sync stopped"
+                echo
+                echo "Fork and upstream main have diverged."
+                echo "No repository refs were changed. Reconcile the divergence through review."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected synchronization state: $state"
+              exit 1
+              ;;
+          esac
 
           git switch --force-create sync-candidate "$downstream"
           git merge --ff-only "$upstream"
@@ -108,3 +120,28 @@ jobs:
             exit 1
           fi
           git push origin HEAD:main
+
+  validate-synced-image:
+    name: Build synchronized image without publishing
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      # GITHUB_TOKEN pushes do not trigger the push-based Docker workflow.
+      # Check the exact validated commit explicitly, without registry credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.sync.outputs.synced_sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
