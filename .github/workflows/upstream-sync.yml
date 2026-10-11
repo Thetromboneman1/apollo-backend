@@ -6,19 +6,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: upstream-sync-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
-  sync:
-    name: Validate and fast-forward main
+  validate-candidate:
+    name: Validate exact upstream candidate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       changed: ${{ steps.state.outputs.changed }}
+      base_sha: ${{ steps.state.outputs.downstream }}
       synced_sha: ${{ steps.state.outputs.upstream }}
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/apollo_test?sslmode=disable
@@ -40,6 +41,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: main
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -106,25 +109,42 @@ jobs:
           go build -trimpath ./cmd/apollo
           docker build --check .
 
-      - name: Fast-forward fork main
-        if: steps.state.outputs.changed == 'true'
+  finalize:
+    name: Fast-forward main to the validated SHA
+    needs: [validate-candidate, validate-candidate-image]
+    if: needs.validate-candidate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BASE_SHA: ${{ needs.validate-candidate.outputs.base_sha }}
+      UPSTREAM_SHA: ${{ needs.validate-candidate.outputs.synced_sha }}
+    steps:
+      - name: Check out the exact validated base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-candidate.outputs.base_sha }}
+      - name: Fast-forward fork main without executing candidate code
         shell: bash
-        env:
-          EXPECTED_DOWNSTREAM: ${{ steps.state.outputs.downstream }}
         run: |
           set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           actual_downstream=$(git rev-parse refs/remotes/origin/main)
-          if [[ "$actual_downstream" != "$EXPECTED_DOWNSTREAM" ]]; then
+          if [[ "$actual_downstream" != "$BASE_SHA" ]]; then
             echo "::error::Fork main advanced during validation; refusing to push."
             exit 1
           fi
-          git push origin HEAD:main
+          git fetch --no-tags https://github.com/Apollo-Reborn/apollo-backend.git "$UPSTREAM_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$UPSTREAM_SHA"
+          git push origin "$UPSTREAM_SHA:refs/heads/main"
 
-  validate-synced-image:
-    name: Build synchronized image without publishing
-    needs: sync
-    if: needs.sync.outputs.changed == 'true'
+  validate-candidate-image:
+    name: Validate exact candidate image without publishing
+    needs: validate-candidate
+    if: needs.validate-candidate.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -134,7 +154,7 @@ jobs:
       # Check the exact validated commit explicitly, without registry credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.sync.outputs.synced_sha }}
+          ref: ${{ needs.validate-candidate.outputs.synced_sha }}
           persist-credentials: false
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
