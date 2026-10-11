@@ -23,10 +23,22 @@ not application failures.
 ## Upstream maintenance
 
 `Fast-forward upstream sync` checks Apollo-Reborn's `main` branch weekly and on
-manual request. It updates this fork only when the fork is a strict ancestor of
-upstream, validates the candidate, and pushes with an exact lease. It stops
-without changing refs when the histories diverge; reconcile downstream-only
-changes through review rather than force-pushing or auto-merging them.
+manual request. Matching branches and upstream histories already contained in
+this fork are successful no-ops, including fork-only governance commits. It
+updates this fork only when the fork is a strict ancestor of upstream, validates
+the candidate, rechecks the downstream SHA, and performs a normal fast-forward
+push. It stops without changing refs when both branches have unique history;
+reconcile that divergence through review rather than force-pushing or
+auto-merging it. The classifier is covered by real-Git regression tests:
+`python3 -m unittest discover -s scripts/tests -v`.
+
+A successful fast-forward explicitly chains a build-only multi-architecture
+Docker job for the exact synchronized SHA. This does not rely on a new `push`
+workflow, which pushes made with `GITHUB_TOKEN` do not trigger.
+The chained job has read-only contents access, no registry login, and
+`push: false`; image publication remains a separate authorized workflow.
+No-op syncs skip candidate validation and image builds because no new upstream
+code is being accepted.
 
 ## Lifecycle observation
 
