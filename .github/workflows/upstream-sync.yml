@@ -25,7 +25,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/apollo_test?sslmode=disable
     services:
       postgres:
-        image: postgres:15-alpine
+        image: postgres:15-alpine@sha256:fc41cfa8a90c09e84dd723ee764be4b2f59ba6c98b1e5b3fca540adddf68a5ba # 15-alpine as of 2026-11-14
         env:
           POSTGRES_DB: apollo_test
           POSTGRES_PASSWORD: postgres
